@@ -219,13 +219,18 @@ get_next_event(#scheduler_state{system = System,
   SortedActors = schedule_sort(Actors, State),
   AvailableActors = filter_sleeping(Sleeping, SortedActors),
   case WakeupTree of
-    % No wake up tree => first run through, just go round robin.
+    % No wake up tree, run through Actors in round robin order. First run always goes through
+    % this codepath.
     [] ->
       % Allocate an event to hold data about what happened
       Event = #event{label = make_ref()},
       get_next_event(Event, System ++ AvailableActors, State#scheduler_state{delay = 0});
+    % We have a wakeup tree, which essentially means this is a replay.
     [{#event{actor = Actor, label = Label} = Event, _}|_] ->
+      % The actor in this case cannot be sleeping.
       false = lists:member(Actor, Sleeping),
+      % See how many scheduling decisions we are screwing up to run this particular actor:
+      % can bound the number of such things.
       Delay =
         case DelayBound =/= infinity of
           true -> count_delay(SortedActors, Actor);
@@ -946,7 +951,7 @@ find_prefix([#trace_state{graph_ref = Sibling} = Other|Rest], State) ->
 %% ENGINE (manipulation of the Erlang processes under the scheduler)
 %% =============================================================================
 
-replay_prefix(Trace, State) ->
+reset_processes(State) ->
   #scheduler_state{
      entry_point = EntryPoint,
      first_process = FirstProcess,
@@ -963,7 +968,10 @@ replay_prefix(Trace, State) ->
     end,
   ok = ets:foldl(Fold, ok, Processes),
   ok =
-    concuerror_callback:start_first_process(FirstProcess, EntryPoint, Timeout),
+    concuerror_callback:start_first_process(FirstProcess, EntryPoint, Timeout).
+
+replay_prefix(Trace, State) ->
+  reset_processes(State),
   replay_prefix_aux(lists:reverse(Trace), State).
 
 replay_prefix_aux([_], State) ->
