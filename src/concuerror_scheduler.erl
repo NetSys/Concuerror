@@ -125,6 +125,7 @@ explore(State) ->
   case Status of
     ok -> explore(UpdatedState);
     none ->
+      % Done exploring one branch, figure out what to do next.
       RacesDetectedState = plan_more_interleavings(UpdatedState),
       LogState = log_trace(RacesDetectedState),
       {HasMore, NewState} = has_more_to_explore(LogState),
@@ -192,6 +193,7 @@ filter_warnings(Warnings, [Ignore|Rest] = Ignored) ->
     {value, _, NewWarnings} -> filter_warnings(NewWarnings, Ignored)
   end.
 
+%% Bounds check failed
 get_next_event(
   #scheduler_state{
      current_warnings = Warnings,
@@ -202,7 +204,10 @@ get_next_event(
       current_warnings = [{depth_bound, Bound}|Warnings],
       trace = Old},
   {none, NewState};
-get_next_event(#scheduler_state{system = System, trace = [Last|_]} = State) ->
+
+%% Interesting code.
+get_next_event(#scheduler_state{system = System, 
+                                trace = [Last|_]} = State) ->
   #trace_state{
      actors      = Actors,
      delay_bound = DelayBound,
@@ -210,10 +215,13 @@ get_next_event(#scheduler_state{system = System, trace = [Last|_]} = State) ->
      sleeping    = Sleeping,
      wakeup_tree = WakeupTree
     } = Last,
+  % Sort actors, GNE/3 calls actors in order.
   SortedActors = schedule_sort(Actors, State),
   AvailableActors = filter_sleeping(Sleeping, SortedActors),
   case WakeupTree of
+    % No wake up tree => first run through, just go round robin.
     [] ->
+      % Allocate an event to hold data about what happened
       Event = #event{label = make_ref()},
       get_next_event(Event, System ++ AvailableActors, State#scheduler_state{delay = 0});
     [{#event{actor = Actor, label = Label} = Event, _}|_] ->
@@ -292,15 +300,23 @@ count_delay([Other|Rest], Actor, N) ->
     end,
   count_delay(Rest, Actor, NN).
 
+%% get_next_event(Event, Actors, SchedulerState);
+%% Call next actor in order.
+%% If we have a channel just deliver it.
 get_next_event(Event, [{Channel, Queue}|_], State) ->
   %% Pending messages can always be sent
   MessageEvent = queue:get(Queue),
   UpdatedEvent = Event#event{actor = Channel, event_info = MessageEvent},
+  % This will always be ok, FinalEvent since messages are never blocked.
   {ok, FinalEvent} = get_next_event_backend(UpdatedEvent, State),
   update_state(FinalEvent, State);
+% If the first thing is a process then
 get_next_event(Event, [P|ActiveProcesses], State) ->
+  % Try calling process. 
   case get_next_event_backend(Event#event{actor = P}, State) of
+    % If blocked, try remaining processes.
     retry -> get_next_event(Event, ActiveProcesses, State);
+    % Else update the event
     {ok, UpdatedEvent} -> update_state(UpdatedEvent, State)
   end;
 get_next_event(_Event, [], State) ->
@@ -511,7 +527,9 @@ remove_message(Channel, [Other|Rest], Acc) ->
 plan_more_interleavings(State) ->
   #scheduler_state{logger = Logger, trace = RevTrace} = State,
   ?time(Logger, "Assigning happens-before..."),
+  % Split into half which has timing information and half which does not.
   {RevEarly, UntimedLate} = split_trace(RevTrace),
+  % Assign happens before to everything.
   Late = assign_happens_before(UntimedLate, RevEarly, State),
   ?time(Logger, "Planning more interleavings..."),
   NewRevTrace = plan_more_interleavings(lists:reverse(RevEarly, Late), [], State),
@@ -651,6 +669,8 @@ maybe_mark_sent_message({message, Message}, Clock, MessageInfo) ->
   ets:update_element(MessageInfo, Id, {?message_sent, Clock});
 maybe_mark_sent_message(_, _, _) -> true.
 
+% events in order, [], state
+% [] is trace thus far
 plan_more_interleavings([], OldTrace, _SchedulerState) ->
   OldTrace;
 plan_more_interleavings([TraceState|Rest], OldTrace, State) ->
@@ -661,6 +681,7 @@ plan_more_interleavings([TraceState|Rest], OldTrace, State) ->
     } = State,
   #trace_state{done = [Event|_], index = _Index, graph_ref = Ref} = TraceState,
   #event{actor = Actor, event_info = EventInfo, special = Special} = Event,
+  % Should we skip trying to find interleavings of this event.
   Skip =
     case proplists:lookup(system_communication, Special) of
       {system_communication, System} -> lists:member(System, NonRacingSystem);
@@ -668,6 +689,7 @@ plan_more_interleavings([TraceState|Rest], OldTrace, State) ->
     end,
   case Skip of
     true ->
+      % Skipping
       plan_more_interleavings(Rest, [TraceState|OldTrace], State);
     false ->
       ClockMap = get_base_clock(OldTrace, []),
@@ -964,21 +986,28 @@ replay_prefix_aux([#trace_state{done = [Event|_], index = I}|Rest], State) ->
 %% INTERNAL INTERFACES
 %% =============================================================================
 
-%% Between scheduler and an instrumented process
+%% Between scheduler and an instrumented process, provides mechanisms to actually
+%% execute what the scheduler desires.
 %%------------------------------------------------------------------------------
-
+% If the next thing is message delivery.
 get_next_event_backend(#event{actor = Channel} = Event, State)
   when ?is_channel(Channel) ->
   #scheduler_state{timeout = Timeout} = State,
   #event{event_info = MessageEvent} = Event,
+  % Make sure no pending messages.
   assert_no_messages(),
+  % Deliver message. This involves delivering a message and waiting for an ack. Event
+  % is updated according to the ack,
   UpdatedEvent =
     concuerror_callback:deliver_message(Event, MessageEvent, Timeout),
   {ok, UpdatedEvent};
+% If the next thing is to get an actor to take a step.
 get_next_event_backend(#event{actor = Pid} = Event, State) when is_pid(Pid) ->
   #scheduler_state{timeout = Timeout} = State,
   assert_no_messages(),
+  % Send actor the event.
   Pid ! Event,
+  % Wait for response, can either be retry or {ok, NewEvent} 
   concuerror_callback:wait_actor_reply(Event, Timeout).
 
 %%%----------------------------------------------------------------------
