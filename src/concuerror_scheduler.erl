@@ -221,56 +221,17 @@ get_next_event(#scheduler_state{system = System,
                                 trace = [Last|_]} = State) ->
   #trace_state{
      actors      = Actors,
-     delay_bound = DelayBound,
-     index       = I,
      sleeping    = Sleeping,
-     wakeup_tree = WakeupTree
+     wakeup_tree = [] 
     } = Last,
   % Sort actors, GNE/3 calls actors in order.
   SortedActors = schedule_sort(Actors, State),
   AvailableActors = filter_sleeping(Sleeping, SortedActors),
-  case WakeupTree of
-    % No wake up tree, run through Actors in round robin order. First run always goes through
-    % this codepath, on subsequent runs many of the runs go through this path..
-    [] ->
-      % Allocate an event to hold data about what happened
-      Event = #event{label = make_ref()},
-      get_next_event(Event, System ++ AvailableActors, State#scheduler_state{delay = 0});
-    % We have a wakeup tree, which essentially means this is a replay.
-    % Wakeup trees are of the form
-    % [{#event{}, 
-    %  [{#event{}, 
-    %   [{...}, ...]}, ...]}, Other wakeup trees]
-    [{#event{actor = Actor, label = Label} = Event, _}|_] ->
-      % The actor in this case cannot be sleeping.
-      false = lists:member(Actor, Sleeping),
-      % See how many scheduling decisions we are screwing up to run this particular actor:
-      % can bound the number of such things.
-      Delay =
-        case DelayBound =/= infinity of
-          true -> count_delay(SortedActors, Actor);
-          false -> 0
-        end,
-      {ok, UpdatedEvent} =
-        case Label =/= undefined of
-          true ->
-            NewEvent = get_next_event_backend(Event, State),
-            try {ok, Event} = NewEvent
-            catch
-              _:_ ->
-                #scheduler_state{print_depth = PrintDepth} = State,
-                Reason =
-                  {replay_mismatch, I, Event, element(2, NewEvent), PrintDepth},
-                ?crash(Reason)
-            end;
-          false ->
-            %% Last event = Previously racing event = Result may differ.
-            ResetEvent = reset_event(Event),
-            get_next_event_backend(ResetEvent, State)
-        end,
-      % This moves us along in the Wakeup Tree
-      update_state(UpdatedEvent, State#scheduler_state{delay = Delay})
-  end.
+  % Run through Actors in round robin order. 
+  % Allocate an event to hold data about what happened
+  Event = #event{label = make_ref()},
+  get_next_event(Event, System ++ AvailableActors, State#scheduler_state{delay = 0}).
+
 
 filter_sleeping([], AvailableActors) -> AvailableActors;
 filter_sleeping([#event{actor = Actor}|Sleeping], AvailableActors) ->
@@ -378,7 +339,7 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 
 %%------------------------------------------------------------------------------
 
-% Move things along in the Wakeup Tree
+% Move things along in the Wakeup Tree and record other things
 update_state(#event{special = Special} = Event, State) ->
   #scheduler_state{
      delay  = Delay,
@@ -418,8 +379,8 @@ update_state(#event{special = Special} = Event, State) ->
        sleeping    = NextSleeping,
        wakeup_tree = NextWakeupTree
       },
-  % Keep track of other possible wake up trees. When this trace is replayed the next time we will find
-  % the "NewLastWakeupTree" and use that.
+  % Keep track of other possible wake up trees. When this trace is replayed, from this particular point,
+  % the next time we will find "NewLastWakeupTree" and use that.
   NewLastTrace =
     Last#trace_state{done = NewLastDone, wakeup_tree = NewLastWakeupTree},
   InitNewState =
@@ -945,14 +906,18 @@ existing([#event{actor = A}|Rest], Initials) ->
 
 has_more_to_explore(State) ->
   #scheduler_state{logger = Logger, trace = Trace} = State,
+  % Find the first state from which we expect to find a race (i.e., which has a wake up tree).
   TracePrefix = find_prefix(Trace, State),
   case TracePrefix =:= [] of
     true -> {false, State#scheduler_state{trace = []}};
     false ->
       ?time(Logger, "New interleaving. Replaying..."),
+      % Get us to the state where we can use the wakeup tree to examine a potential race.
       NewState = replay_prefix(TracePrefix, State),
       ?debug(Logger, "~s~n",["Replay done."]),
-      FinalState = NewState#scheduler_state{trace = TracePrefix},
+      PreWUTState = NewState#scheduler_state{trace = TracePrefix},
+      % Replay the wakeup tree itself
+      FinalState = replay_wakeup_tree(PreWUTState),
       {true, FinalState}
   end.
 
@@ -967,6 +932,56 @@ find_prefix([#trace_state{graph_ref = Sibling} = Other|Rest], State) ->
   concuerror_logger:graph_set_node(Logger, Parent, Sibling),
   [Other#trace_state{graph_ref = make_ref(), clock_map = dict:new()}|Rest].
 
+% Explore the current wakeup tree
+replay_wakeup_tree(#scheduler_state{
+                      trace = [#trace_state{wakeup_tree = WakeupTree}=Last|_]}=State) 
+                  when WakeupTree =/= [] ->
+  % We have a wakeup tree, which we are replaying.
+  % Wakeup trees are of the form
+  % [{#event{}, 
+  %  [{#event{}, 
+  %   [{...}, ...]}, ...]}, Other wakeup trees]
+  #trace_state{
+     actors      = Actors,
+     delay_bound = DelayBound,
+     index       = I,
+     sleeping    = Sleeping,
+     wakeup_tree = WakeupTree
+    } = Last,
+  % Sort actors, GNE/3 calls actors in order.
+  SortedActors = schedule_sort(Actors, State),
+  [{#event{actor = Actor, label = Label} = Event, _}|_] = WakeupTree,
+  % The actor in this case cannot be sleeping.
+  false = lists:member(Actor, Sleeping),
+  % See how many scheduling decisions we are screwing up to run this particular actor:
+  % can bound the number of such things.
+  Delay =
+    case DelayBound =/= infinity of
+      true -> count_delay(SortedActors, Actor);
+      false -> 0
+    end,
+  {ok, UpdatedEvent} =
+    case Label =/= undefined of
+      true ->
+        NewEvent = get_next_event_backend(Event, State),
+        try {ok, Event} = NewEvent
+        catch
+          _:_ ->
+            #scheduler_state{print_depth = PrintDepth} = State,
+            Reason =
+              {replay_mismatch, I, Event, element(2, NewEvent), PrintDepth},
+            ?crash(Reason)
+        end;
+      false ->
+        %% Last event = Previously racing event = Result may differ.
+        ResetEvent = reset_event(Event),
+        get_next_event_backend(ResetEvent, State)
+    end,
+  % This moves us along in the Wakeup Tree
+  {ok, UpState} =  update_state(UpdatedEvent, State#scheduler_state{delay = Delay}),
+  replay_wakeup_tree(UpState);
+replay_wakeup_tree(#scheduler_state{}=State) ->
+  State.
 
 %% =============================================================================
 %% ENGINE (manipulation of the Erlang processes under the scheduler)
