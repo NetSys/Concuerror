@@ -150,19 +150,6 @@ explore(State) ->
       exit(Why)
   end.
 
-new_dpor_exploration(State) ->
-  % Done exploring one branch, figure out what to do next. In particular what this
-  % does is find when races have been discovered, etc.
-  RacesDetectedState = plan_more_interleavings(State),
-  LogState = log_trace(RacesDetectedState),
-  % Once we have figured out a new trace, get things ready to replay. What this does
-  % is very simple:
-  % (a) Find a starting point/state from which the trace should be explored.
-  % (b) Go through all states starting from this point.
-  % (c) Execute the set of steps in the wakeup tree so that a race is likely.
-  % (b) Replay from this point to find a race.
-  has_more_to_explore(LogState).
-
 %%------------------------------------------------------------------------------
 
 log_trace(State) ->
@@ -330,6 +317,41 @@ get_next_event(_Event, [], State) ->
     end,
   {none, State#scheduler_state{current_warnings = NewWarnings, trace = Prev}}.
 
+% Record what is going on as we explore more
+update_state(#event{special = Special} = Event, State) ->
+  #scheduler_state{
+     logger = Logger,
+     trace  = [Last|Prev]
+    } = State,
+  #trace_state{
+     actors      = Actors,
+     delay_bound = DelayBound,
+     done        = Done,
+     index       = Index,
+     graph_ref   = Ref,
+     sleeping    = Sleeping
+    } = Last,
+  ?trace(Logger, "~s~n", [?pretty_s(Index, Event)]),
+  concuerror_logger:graph_new_node(Logger, Ref, Index, Event),
+  AllSleeping = ordsets:union(ordsets:from_list(Done), Sleeping),
+  NextSleeping = update_sleeping(Event, AllSleeping, State),
+  NewLastDone = [Event|Done],
+  InitNextTrace =
+    #trace_state{
+       actors      = Actors,
+       delay_bound = DelayBound,
+       index       = Index + 1,
+       sleeping    = NextSleeping
+      },
+  % Keep track of other possible wake up trees. When this trace is replayed, from this particular point,
+  % the next time we will find "NewLastWakeupTree" and use that.
+  NewLastTrace =
+    Last#trace_state{done = NewLastDone},
+  InitNewState =
+    State#scheduler_state{trace = [InitNextTrace, NewLastTrace|Prev]},
+  NewState = maybe_log(Event, InitNewState, Index),
+  {ok, update_special(Special, NewState)}.
+
 reset_event(#event{actor = Actor, event_info = EventInfo}) ->
   ResetEventInfo =
     case ?is_channel(Actor) of
@@ -343,9 +365,8 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
     }.
 
 %%------------------------------------------------------------------------------
-
-% Move things along in the Wakeup Tree and record other things
-update_state(#event{special = Special} = Event, State) ->
+% Update state when replaying from Wakeup tree
+update_wut_state(#event{special = Special} = Event, State) ->
   #scheduler_state{
      delay  = Delay,
      logger = Logger,
@@ -365,11 +386,7 @@ update_state(#event{special = Special} = Event, State) ->
   AllSleeping = ordsets:union(ordsets:from_list(Done), Sleeping),
   NextSleeping = update_sleeping(Event, AllSleeping, State),
   % NextWakeupTree is what we care about here, tells us where to go next.
-  {NewLastWakeupTree, NextWakeupTree} =
-    case WakeupTree of
-      [] -> {[], []};
-      [{_, NWT}|Rest] -> {Rest, NWT}
-    end,
+  [{_, NextWakeupTree}|NewLastWakeupTree] = WakeupTree,
   NewLastDone = [Event|Done],
   NewDelayBound =
     case Delay =:= 0 of
@@ -392,6 +409,7 @@ update_state(#event{special = Special} = Event, State) ->
     State#scheduler_state{trace = [InitNextTrace, NewLastTrace|Prev]},
   NewState = maybe_log(Event, InitNewState, Index),
   {ok, update_special(Special, NewState)}.
+
 
 maybe_log(#event{actor = P} = Event, State0, Index) ->
   #scheduler_state{logger = Logger, treat_as_normal = Normal} = State0,
@@ -514,6 +532,19 @@ remove_message(Channel, [Other|Rest], Acc) ->
   remove_message(Channel, Rest, [Other|Acc]).
 
 %%------------------------------------------------------------------------------
+
+new_dpor_exploration(State) ->
+  % Done exploring one branch, figure out what to do next. In particular what this
+  % does is find when races have been discovered, etc.
+  RacesDetectedState = plan_more_interleavings(State),
+  LogState = log_trace(RacesDetectedState),
+  % Once we have figured out a new trace, get things ready to replay. What this does
+  % is very simple:
+  % (a) Find a starting point/state from which the trace should be explored.
+  % (b) Go through all states starting from this point.
+  % (c) Execute the set of steps in the wakeup tree so that a race is likely.
+  % (b) Replay from this point to find a race.
+  has_more_to_explore(LogState).
 
 plan_more_interleavings(State) ->
   #scheduler_state{logger = Logger, trace = RevTrace} = State,
@@ -983,7 +1014,7 @@ replay_wakeup_tree(#scheduler_state{
         get_next_event_backend(ResetEvent, State)
     end,
   % This moves us along in the Wakeup Tree
-  {ok, UpState} =  update_state(UpdatedEvent, State#scheduler_state{delay = Delay}),
+  {ok, UpState} =  update_wut_state(UpdatedEvent, State#scheduler_state{delay = Delay}),
   replay_wakeup_tree(UpState);
 replay_wakeup_tree(#scheduler_state{}=State) ->
   State.
