@@ -118,6 +118,12 @@ run(Options) ->
 explore(State) ->
   {Status, UpdatedState} =
     try
+      % Change get_next_event to remove replay dependency on wakeup trees.
+      % Perhaps split into three pieces
+      % - Round robin scheduler
+      % - WUT scheduler
+      % - Replay scheduler.
+      % DPOR is then replay followed by WUT followed by round robin.
       get_next_event(State)
     catch
       exit:Reason -> {{crash, Reason}, State}
@@ -232,6 +238,9 @@ get_next_event(#scheduler_state{system = System,
       get_next_event(Event, System ++ AvailableActors, State#scheduler_state{delay = 0});
     % We have a wakeup tree, which essentially means this is a replay.
     % Wakeup trees are of the form
+    % [{#event{}, 
+    %  [{#event{}, 
+    %   [{...}, ...]}, ...]}, Other wakeup trees]
     [{#event{actor = Actor, label = Label} = Event, _}|_] ->
       % The actor in this case cannot be sleeping.
       false = lists:member(Actor, Sleeping),
@@ -259,6 +268,7 @@ get_next_event(#scheduler_state{system = System,
             ResetEvent = reset_event(Event),
             get_next_event_backend(ResetEvent, State)
         end,
+      % This moves us along in the Wakeup Tree
       update_state(UpdatedEvent, State#scheduler_state{delay = Delay})
   end.
 
@@ -368,6 +378,7 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 
 %%------------------------------------------------------------------------------
 
+% Move things along in the Wakeup Tree
 update_state(#event{special = Special} = Event, State) ->
   #scheduler_state{
      delay  = Delay,
@@ -387,6 +398,7 @@ update_state(#event{special = Special} = Event, State) ->
   concuerror_logger:graph_new_node(Logger, Ref, Index, Event),
   AllSleeping = ordsets:union(ordsets:from_list(Done), Sleeping),
   NextSleeping = update_sleeping(Event, AllSleeping, State),
+  % NextWakeupTree is what we care about here, tells us where to go next.
   {NewLastWakeupTree, NextWakeupTree} =
     case WakeupTree of
       [] -> {[], []};
@@ -406,6 +418,8 @@ update_state(#event{special = Special} = Event, State) ->
        sleeping    = NextSleeping,
        wakeup_tree = NextWakeupTree
       },
+  % Keep track of other possible wake up trees. When this trace is replayed the next time we will find
+  % the "NewLastWakeupTree" and use that.
   NewLastTrace =
     Last#trace_state{done = NewLastDone, wakeup_tree = NewLastWakeupTree},
   InitNewState =
