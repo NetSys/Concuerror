@@ -694,8 +694,7 @@ maybe_mark_sent_message({message, Message}, Clock, MessageInfo) ->
   ets:update_element(MessageInfo, Id, {?message_sent, Clock});
 maybe_mark_sent_message(_, _, _) -> true.
 
-% events in order, [], state
-% [] is trace thus far
+% events in order, New Trace, Scheduler State
 plan_more_interleavings([], OldTrace, _SchedulerState) ->
   OldTrace;
 plan_more_interleavings([TraceState|Rest], OldTrace, State) ->
@@ -957,12 +956,14 @@ has_more_to_explore(State) ->
       {true, FinalState}
   end.
 
+% Find first trace state that has a wakeup tree.
 find_prefix([], _State) -> [];
 find_prefix([#trace_state{wakeup_tree = []}|Rest], State) ->
   find_prefix(Rest, State);
 find_prefix([#trace_state{graph_ref = Sibling} = Other|Rest], State) ->
   #scheduler_state{logger = Logger} = State,
   [#trace_state{graph_ref = Parent}|_] = Rest,
+  % Exploring states from this state onwards.
   concuerror_logger:graph_set_node(Logger, Parent, Sibling),
   [Other#trace_state{graph_ref = make_ref(), clock_map = dict:new()}|Rest].
 
@@ -991,6 +992,7 @@ reset_processes(State) ->
     concuerror_callback:start_first_process(FirstProcess, EntryPoint, Timeout).
 
 replay_prefix(Trace, State) ->
+  % Just reset processes to their original state, with first process at its entry point.
   reset_processes(State),
   replay_prefix_aux(lists:reverse(Trace), State).
 
@@ -1000,6 +1002,7 @@ replay_prefix_aux([_], State) ->
 replay_prefix_aux([#trace_state{done = [Event|_], index = I}|Rest], State) ->
   #scheduler_state{logger = _Logger, print_depth = PrintDepth} = State,
   ?trace(_Logger, "~s~n", [?pretty_s(I, Event)]),
+  % Execute the event currently at the head of the prefix.
   {ok, NewEvent} = get_next_event_backend(Event, State),
   try
     true = Event =:= NewEvent
