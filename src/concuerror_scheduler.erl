@@ -131,15 +131,7 @@ explore(State) ->
   case Status of
     ok -> explore(UpdatedState);
     none ->
-      % Done exploring one branch, figure out what to do next. In particular what this
-      % does is find when races have been discovered, etc.
-      RacesDetectedState = plan_more_interleavings(UpdatedState),
-      LogState = log_trace(RacesDetectedState),
-      % Once we have figured out a new trace, get things ready to replay. What this does
-      % if very simple:
-      % (a) Find a prefix of the old execution that isn't going to change. Play that prefix.
-      % (b) Return the new suffix that is changed.
-      {HasMore, NewState} = has_more_to_explore(LogState),
+      {HasMore, NewState} = new_dpor_exploration(UpdatedState),
       case HasMore of
         true -> explore(NewState);
         false -> ok
@@ -157,6 +149,19 @@ explore(State) ->
       catch log_trace(FatalCrashState),
       exit(Why)
   end.
+
+new_dpor_exploration(State) ->
+  % Done exploring one branch, figure out what to do next. In particular what this
+  % does is find when races have been discovered, etc.
+  RacesDetectedState = plan_more_interleavings(State),
+  LogState = log_trace(RacesDetectedState),
+  % Once we have figured out a new trace, get things ready to replay. What this does
+  % is very simple:
+  % (a) Find a starting point/state from which the trace should be explored.
+  % (b) Go through all states starting from this point.
+  % (c) Execute the set of steps in the wakeup tree so that a race is likely.
+  % (b) Replay from this point to find a race.
+  has_more_to_explore(LogState).
 
 %%------------------------------------------------------------------------------
 
