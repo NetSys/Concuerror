@@ -125,9 +125,14 @@ explore(State) ->
   case Status of
     ok -> explore(UpdatedState);
     none ->
-      % Done exploring one branch, figure out what to do next.
+      % Done exploring one branch, figure out what to do next. In particular what this
+      % does is find when races have been discovered, etc.
       RacesDetectedState = plan_more_interleavings(UpdatedState),
       LogState = log_trace(RacesDetectedState),
+      % Once we have figured out a new trace, get things ready to replay. What this does
+      % if very simple:
+      % (a) Find a prefix of the old execution that isn't going to change. Play that prefix.
+      % (b) Return the new suffix that is changed.
       {HasMore, NewState} = has_more_to_explore(LogState),
       case HasMore of
         true -> explore(NewState);
@@ -220,12 +225,13 @@ get_next_event(#scheduler_state{system = System,
   AvailableActors = filter_sleeping(Sleeping, SortedActors),
   case WakeupTree of
     % No wake up tree, run through Actors in round robin order. First run always goes through
-    % this codepath.
+    % this codepath, on subsequent runs many of the runs go through this path..
     [] ->
       % Allocate an event to hold data about what happened
       Event = #event{label = make_ref()},
       get_next_event(Event, System ++ AvailableActors, State#scheduler_state{delay = 0});
     % We have a wakeup tree, which essentially means this is a replay.
+    % Wakeup trees are of the form
     [{#event{actor = Actor, label = Label} = Event, _}|_] ->
       % The actor in this case cannot be sleeping.
       false = lists:member(Actor, Sleeping),
