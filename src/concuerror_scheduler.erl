@@ -89,7 +89,9 @@ run(Options) ->
       },
   ScheduleFunc = case ?opt(strategy, Options) of
     dpor -> fun new_dpor_exploration/1;
-    dumb -> fun new_dumb_exploration/1
+    dumb -> fun new_dumb_exploration/1;
+    scheds -> fun new_sched_strat_exploration/1;
+    rand -> fun new_random_exploration/1
   end,
   InitialState =
     #scheduler_state{
@@ -140,6 +142,7 @@ explore(State) ->
     none ->
       #scheduler_state{next_schedule=NewExploration} = UpdatedState,
       {HasMore, NewState} = NewExploration(UpdatedState),
+      io:format("-------------------------------------------------------------------~n"),
       case HasMore of
         true -> explore(NewState);
         false -> ok
@@ -242,6 +245,9 @@ filter_sleeping([#event{actor = Actor}|Sleeping], AvailableActors) ->
     end,
   filter_sleeping(Sleeping, NewAvailableActors).
 
+randomize_list(Lst) ->
+  [X || {_, X} <- lists:keysort(1, [{random:uniform(), L} || L <- Lst])].
+
 schedule_sort([], _State) -> [];
 schedule_sort(Actors, State) ->
   #scheduler_state{
@@ -256,12 +262,17 @@ schedule_sort(Actors, State) ->
       round_robin ->
         Split = fun(E) -> E =/= LastScheduled end,    
         {Pre, Post} = lists:splitwith(Split, Actors),
-        Post ++ Pre
+        Post ++ Pre;
+      randomize ->
+        randomize_list(Actors)
     end,
   case StrictScheduling of
     true when Scheduling =:= round_robin ->
-      [LastScheduled|Rest] = Sorted,
-      Rest ++ [LastScheduled];
+      case Sorted of
+      [LastScheduled|Rest] ->
+         Rest ++ [LastScheduled];
+      L -> L
+      end;
     false when Scheduling =/= round_robin ->
       [LastScheduled|lists:delete(LastScheduled, Sorted)];
     _ -> Sorted
@@ -287,6 +298,7 @@ count_delay([Other|Rest], Actor, N) ->
 %% If we have a channel just deliver it.
 get_next_event(Event, [{Channel, Queue}|_], State) ->
   %% Pending messages can always be sent
+  io:format("~p~n", [Channel]),
   MessageEvent = queue:get(Queue),
   UpdatedEvent = Event#event{actor = Channel, event_info = MessageEvent},
   % This will always be ok, FinalEvent since messages are never blocked.
@@ -299,7 +311,8 @@ get_next_event(Event, [P|ActiveProcesses], State) ->
     % If blocked, try remaining processes.
     retry -> get_next_event(Event, ActiveProcesses, State);
     % Else update the event
-    {ok, UpdatedEvent} -> 
+    {ok, UpdatedEvent} ->
+          io:format("~p~n", [P]),
           update_state(UpdatedEvent, State)
   end;
 get_next_event(_Event, [], State) ->
@@ -541,21 +554,53 @@ remove_message(Channel, [Other|Rest], Acc) ->
   remove_message(Channel, Rest, [Other|Acc]).
 
 %%------------------------------------------------------------------------------
-
-new_dumb_exploration(#scheduler_state{
-                        first_replay = F,
-                        trace = [TF | _],
-                        first_process = FirstProcess
-                    } = State)
-   when F == true ->
-  reset_processes(State),
+reset_trace_and_process(#scheduler_state{
+                               trace = [TF | _],
+                               first_process = FirstProcess} = State) ->
+  LogState = log_trace(State),
+  reset_processes(LogState),
   #trace_state{delay_bound = Delay} = TF,
   InitialTrace =
     #trace_state{
        actors = [FirstProcess],
        delay_bound = Delay
       },
-  {true, State#scheduler_state{first_replay = false, trace = [InitialTrace]}} ;
+  State#scheduler_state{first_replay = false, trace = [InitialTrace]}.
+
+new_sched_strat_exploration(#scheduler_state{
+                               scheduling = S,
+                              strict_scheduling = Strict} = State) 
+     when S =:= round_robin ->
+  case Strict of
+    false ->
+      ResetState = reset_trace_and_process(State),
+      {true, ResetState#scheduler_state{scheduling=round_robin, strict_scheduling=true}};
+    true ->
+      ResetState = reset_trace_and_process(State),
+      {true, ResetState#scheduler_state{scheduling=randomize, strict_scheduling=true}}
+  end;
+new_sched_strat_exploration(#scheduler_state{
+                               scheduling = S} = State) 
+     when S =:= randomize ->
+  ResetState = reset_trace_and_process(State),
+  {true, ResetState#scheduler_state{scheduling=newest, strict_scheduling=true}};
+new_sched_strat_exploration(#scheduler_state{
+                               scheduling = S} = State) 
+     when S =:= newest ->
+  ResetState = reset_trace_and_process(State),
+  {true, ResetState#scheduler_state{scheduling=oldest, strict_scheduling=true}};
+new_sched_strat_exploration(#scheduler_state{} = State)  ->
+  {false, State}.
+
+new_random_exploration(#scheduler_state{} = State) ->
+  ResetState = reset_trace_and_process(State),
+  {true, ResetState#scheduler_state{scheduling=randomize, strict_scheduling=true}}.
+
+new_dumb_exploration(#scheduler_state{
+                        first_replay = F
+                    } = State)
+    when F == true ->
+  {true, reset_trace_and_process(State)};
 new_dumb_exploration(#scheduler_state{} = State) ->
   {false, State}.
 
