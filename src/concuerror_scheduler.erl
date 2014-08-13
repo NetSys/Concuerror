@@ -61,7 +61,8 @@
           timeout                  :: timeout(),
           trace             = []   :: [trace_state()],
           treat_as_normal   = []   :: [atom()],
-          next_schedule     = fun new_dpor_exploration/1 :: fun() 
+          next_schedule     = fun new_dpor_exploration/1 :: fun(),
+          first_replay      = true :: boolean()
          }).
 
 %% =============================================================================
@@ -86,6 +87,10 @@ run(Options) ->
        actors = [FirstProcess],
        delay_bound = ?opt(delay_bound, Options)
       },
+  ScheduleFunc = case ?opt(dumb_replay, Options) of
+    false -> fun new_dpor_exploration/1;
+    true -> fun new_dumb_exploration/1
+  end,
   InitialState =
     #scheduler_state{
        ignore_first_crash = ?opt(ignore_first_crash, Options),
@@ -107,6 +112,7 @@ run(Options) ->
        system = System,
        trace = [InitialTrace],
        treat_as_normal = ?opt(treat_as_normal, Options),
+       next_schedule = ScheduleFunc,
        timeout = Timeout = ?opt(timeout, Options)
       },
   ok = concuerror_callback:start_first_process(FirstProcess, EntryPoint, Timeout),
@@ -293,7 +299,8 @@ get_next_event(Event, [P|ActiveProcesses], State) ->
     % If blocked, try remaining processes.
     retry -> get_next_event(Event, ActiveProcesses, State);
     % Else update the event
-    {ok, UpdatedEvent} -> update_state(UpdatedEvent, State)
+    {ok, UpdatedEvent} -> 
+          update_state(UpdatedEvent, State)
   end;
 get_next_event(_Event, [], State) ->
   %% Nothing to do, trace is completely explored
@@ -534,6 +541,23 @@ remove_message(Channel, [Other|Rest], Acc) ->
   remove_message(Channel, Rest, [Other|Acc]).
 
 %%------------------------------------------------------------------------------
+
+new_dumb_exploration(#scheduler_state{
+                        first_replay = F,
+                        trace = [TF | _],
+                        first_process = FirstProcess
+                    } = State)
+   when F == true ->
+  reset_processes(State),
+  #trace_state{delay_bound = Delay} = TF,
+  InitialTrace =
+    #trace_state{
+       actors = [FirstProcess],
+       delay_bound = Delay
+      },
+  {true, State#scheduler_state{first_replay = false, trace = [InitialTrace]}} ;
+new_dumb_exploration(#scheduler_state{} = State) ->
+  {false, State}.
 
 new_dpor_exploration(State) ->
   % Done exploring one branch, figure out what to do next. In particular what this
