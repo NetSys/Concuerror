@@ -87,9 +87,9 @@ run(Options) ->
        actors = [FirstProcess],
        delay_bound = ?opt(delay_bound, Options)
       },
-  ScheduleFunc = case ?opt(dumb_replay, Options) of
-    false -> fun new_dpor_exploration/1;
-    true -> fun new_dumb_exploration/1
+  ScheduleFunc = case ?opt(strategy, Options) of
+    dpor -> fun new_dpor_exploration/1;
+    dumb -> fun new_dumb_exploration/1
   end,
   InitialState =
     #scheduler_state{

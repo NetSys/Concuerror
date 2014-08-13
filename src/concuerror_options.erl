@@ -115,8 +115,8 @@ options() ->
   ,{ignore_first_crash, $i, {boolean, false},
     "If not enabled, Concuerror will immediately exit if the first interleaving"
     " contains errors."}
-  ,{dumb_replay, undefined, {boolean, false},
-    "Use dumb replay mechanism rather than DPOR"}
+  ,{strategy, undefined, {atom, dpor},
+    "What exploration strategy to use, default is DPOR"}
   ,{ignore_error, undefined, atom,
     "Concuerror will not report errors of the specified kind: 'crash' (all"
     " process crashes, see also next option for more refined control),"
