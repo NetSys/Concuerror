@@ -60,7 +60,8 @@
           system            = []   :: [pid()],
           timeout                  :: timeout(),
           trace             = []   :: [trace_state()],
-          treat_as_normal   = []   :: [atom()]
+          treat_as_normal   = []   :: [atom()],
+          next_schedule     = fun new_dpor_exploration/1 :: fun() 
          }).
 
 %% =============================================================================
@@ -131,7 +132,8 @@ explore(State) ->
   case Status of
     ok -> explore(UpdatedState);
     none ->
-      {HasMore, NewState} = new_dpor_exploration(UpdatedState),
+      #scheduler_state{next_schedule=NewExploration} = UpdatedState,
+      {HasMore, NewState} = NewExploration(UpdatedState),
       case HasMore of
         true -> explore(NewState);
         false -> ok
