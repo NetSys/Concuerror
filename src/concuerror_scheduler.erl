@@ -565,7 +565,7 @@ reset_trace_and_process(#scheduler_state{
        actors = [FirstProcess],
        delay_bound = Delay
       },
-  State#scheduler_state{first_replay = false, trace = [InitialTrace]}.
+  LogState#scheduler_state{first_replay = false, trace = [InitialTrace]}.
 
 new_sched_strat_exploration(#scheduler_state{
                                scheduling = S,
