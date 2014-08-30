@@ -1,5 +1,0 @@
-language: erlang
-otp_release:
-   - R16B03-1
-script: "make tests-all"
-after_failure: "./tests/travis_report"

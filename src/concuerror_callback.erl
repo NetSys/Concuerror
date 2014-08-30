@@ -1004,6 +1004,7 @@ deliver_message(Event, MessageEvent, Timeout, Instant) ->
       false -> Self
     end,
   Recipient ! {Type, Message, Notify},
+  
   receive
     {trapping, Trapping} ->
       NewMessageEvent = MessageEvent#message_event{trapping = Trapping},
@@ -1033,6 +1034,7 @@ deliver_message(Event, MessageEvent, Timeout, Instant) ->
             true -> NewEvent;
             false -> deliver_message(NewEvent, SystemReply, Timeout, Instant)
           end;
+		
         false ->
           SystemReply = find_system_reply(Recipient, Special),
           case Instant =:= false of
