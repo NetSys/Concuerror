@@ -258,6 +258,13 @@
           event_info   :: event_info(),
           label        :: label(),
           location     :: location(),
+		  %
+          %     case Special of
+          %      {message_received, #Ref} ->
+          %      {message_delivered, #message_event} ->
+          %      {message, #message_event} ->
+          %      {system_communication, user},
+          %      {new, PID} ->
           special = [] :: [term()] %% XXX: Specify
          }).
 

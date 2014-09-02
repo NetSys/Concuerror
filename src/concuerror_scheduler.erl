@@ -137,7 +137,7 @@ explore(#scheduler_state{current_warnings = Warnings,
   [CurrentTrace|Old] = Traces,
   #trace_state{
 			   actors = CurActors,
-			   index = _Index
+         index = _Index
 			  } = CurrentTrace,
   
   {Status, UpdatedEvent} = try
@@ -161,7 +161,10 @@ explore(#scheduler_state{current_warnings = Warnings,
 	  explore(UpdatedState);
 	
     none ->
- 	  UpdatedState = update_state(State),
+    print_debug(yellow, ["Depth "
+        ++ integer_to_list(_Index)]),
+
+    UpdatedState = update_state(State),
       {HasMore, NewState} = new_dpor_exploration(UpdatedState),
       case HasMore of
         true -> explore(NewState);
@@ -395,19 +398,17 @@ plan_more_interleavings([], OldTrace, _SchedulerState) ->
 plan_more_interleavings([TraceState|Rest] = Trace, OldTrace, State) ->
   #scheduler_state{
      logger = _Logger,
-     message_info = MessageInfo,
      non_racing_system = NonRacingSystem
     } = State,
   
   #trace_state{
-		     done = [Event|_] = Done, 
+		     done = [Event|_] = _Done, 
 		     index = _Index, 
              graph_ref = Ref
   } = TraceState,
   
   #event{
-		 actor = Actor, 
-		 event_info = EventInfo, 
+		 event_info = _EventInfo, 
 		 special = Special
   } = Event,
   
@@ -419,31 +420,9 @@ plan_more_interleavings([TraceState|Rest] = Trace, OldTrace, State) ->
   
   case Skip of
     true ->
-      % Skipping
       plan_more_interleavings(Rest, [TraceState|OldTrace], State);
     false ->
-	  % ===== Update the vector clocks (Start). =====
-      ClockMap = get_base_clock(OldTrace, []),
-      StateClock = lookup_clock(state, ClockMap),
-      ActorLast = lookup_clock_value(Actor, StateClock),
-      ActorClock = orddict:store(Actor, ActorLast, lookup_clock(Actor, ClockMap)),
-      BaseClock = case ?is_channel(Actor) of
-          true ->
-            #message_event{message = #message{id = Id}} = EventInfo,
-            message_clock(Id, MessageInfo, ActorClock);
-          false -> ActorClock
-        end,
-	  % ===== Update the vector clocks (End). =====
-
-	  %io:format("ClockMap    ~p~n",  [ClockMap]),
-	  %io:format("StateClock  ~p~n",  [StateClock]),
-	  %io:format("ActorLast   ~p~n",  [ActorLast]),
-	  %io:format("ActorClock  ~p~n",  [ActorClock]),
-	  %io:format("BaseClock   ~p~n",  [BaseClock]),
-	  %case length(Done) > 1 of
-	  %  true -> io:format("Done ~p~n", [Done]);
-      %  false -> ok
-	  %end,
+      BaseClock = update_actor_clock(Event, State, OldTrace),
 	  
       ?debug(_Logger, "~s~n", [?pretty_s(_Index, Event)]),
       GState = State#scheduler_state{current_graph_ref = Ref},
@@ -454,6 +433,40 @@ plan_more_interleavings([TraceState|Rest] = Trace, OldTrace, State) ->
       plan_more_interleavings(Rest, [TraceState|BaseNewOldTrace], State)
   end.
 
+
+update_actor_clock(Event, SchedState, OldTrace) -> 
+  #event{
+		 actor = Actor, 
+		 event_info = EventInfo
+  } = Event,
+
+  #scheduler_state{
+     logger = _Logger,
+     message_info = MessageInfo
+  } = SchedState,
+  
+  ClockMap = get_base_clock(OldTrace, []),
+  StateClock = lookup_clock(state, ClockMap),
+  ActorLast = lookup_clock_value(Actor, StateClock),
+  ActorClock = orddict:store(Actor, ActorLast, lookup_clock(Actor, ClockMap)),
+  case ?is_channel(Actor) of
+    true ->
+      #message_event{message = #message{id = Id}} = EventInfo,
+      message_clock(Id, MessageInfo, ActorClock, ?message_sent);
+    false -> ActorClock
+  end.
+
+  %io:format("ClockMap    ~p~n",  [ClockMap]),
+  %io:format("StateClock  ~p~n",  [StateClock]),
+  %io:format("ActorLast   ~p~n",  [ActorLast]),
+  %io:format("ActorClock  ~p~n",  [ActorClock]),
+  %io:format("BaseClock   ~p~n",  [BaseClock]),
+  %case length(Done) > 1 of
+  %  true -> io:format("Done ~p~n", [Done]);
+  %  false -> ok
+  %end,
+  
+  
 print_debug(red, Msg) ->
   io:format("\e[1;31m~p\e[m~n~n", Msg);
 
@@ -560,24 +573,26 @@ assign_happens_before([], RevLate, _RevEarly, _State) ->
   lists:reverse(RevLate);
 
 assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
-  #scheduler_state{logger = _Logger, message_info = MessageInfo} = State,
-  #trace_state{done = [Event|RestEvents], index = Index} = TraceState,
-  #event{actor = Actor, special = Special} = Event,
+  
+  #scheduler_state{
+    logger = _Logger,
+    message_info = MessageInfo
+  } = State,
+  
+  #trace_state{
+    done = [Event|RestEvents],
+	index = Index
+  } = TraceState,
+  
+  #event{
+	actor = Actor,
+	special = Special
+  } = Event,
   
   ClockMap = get_base_clock(RevLate, RevEarly),
   OldClock = lookup_clock(Actor, ClockMap),
   ActorClock = orddict:store(Actor, Index, OldClock),
   
-  %io:format("================================~n"),
-  %io:format("Actor          -> ~p~n", [Actor]),
-  %io:format("Event Location -> ~p~n", [Location]),
-  %io:format("ClockMap Keys  -> ~p~n", [dict:fetch_keys(ClockMap)]),
-  %io:format("HB             -> ~s~n", [?pretty_s(Index,Event)]),
-  %io:format("HB             -> ~p~n", [Event]),
-  %io:format("OldClock       -> ~p~n", [OldClock]),
-  %io:format("ActorClock      -> ~p~n", [ActorClock]),
-  %io:format("MessageInfo    -> ~p~n", [MessageInfo]),
-
   BaseHappenedBeforeClock =
     add_pre_message_clocks(Special, MessageInfo, ActorClock),
   
@@ -616,6 +631,16 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   NewTraceState = TraceState#trace_state{
       clock_map = FinalClockMap,
       done = [Event|RestEvents]},
+    
+  %io:format("================================~n"),
+  %io:format("Actor          -> ~p~n", [Actor]),
+  %io:format("Event Location -> ~p~n", [Location]),
+  %io:format("ClockMap Keys  -> ~p~n", [dict:fetch_keys(ClockMap)]),
+  %io:format("HB             -> ~s~n", [?pretty_s(Index,Event)]),
+  %io:format("HB             -> ~p~n", [Event]),
+  %io:format("OldClock       -> ~p~n", [OldClock]),
+  %io:format("ActorClock      -> ~p~n", [ActorClock]),
+  %io:format("MessageInfo    -> ~p~n", [MessageInfo]),
   
   assign_happens_before(Later, [NewTraceState|RevLate], RevEarly, State).
 
@@ -1060,40 +1085,41 @@ get_base_clock(RevLate, RevEarly) ->
 get_base_clock([]) -> throw(none);
 get_base_clock([#trace_state{clock_map = ClockMap}|_]) -> ClockMap.
 
-% Go through 'Specials' and for each event add a clock that is
-% associated with the message event. AFAIK, this is used to get
-% around local delivery issues.
+% Go through 'Specials' and for each event and if it's:
+% 
+% Message_delivered:
+% See if this message has been previously sent. If it has, this means that it
+% 'happened before' message_sent event, so consequently thake the max (merge)
+% those two sets clocks.
+% 
+% Message received:
+% Same thing as above, except look for the message_sent event.
 %
-%     case Special of
-%      {message_received, #Ref} ->
-%      {message_delivered, #message_event} ->
-%      {message, #message_event} ->
-%      {system_communication, user},
-%      {new, PID} ->
-% Example:ok
-
-% 	ActorClock      -> [{{<0.53.0>,<0.38.0>},4}]
-%	Special        -> {message_delivered, #message_event}
-%	NewClock        -> [{<0.53.0>,3},{{<0.53.0>,<0.38.0>},4}]
+% All messages events have the following causal relationship:
+%  Message Sent -> Message Delivered -> Message Received.  
 add_pre_message_clocks([], _, Clock) -> Clock;
 add_pre_message_clocks([Special|Specials], MessageInfo, Clock) ->
   NewClock =
     case Special of
       {message_received, Id} ->
-        case ets:lookup_element(MessageInfo, Id, ?message_delivered) of
-          undefined -> Clock;
-          RMessageClock -> max_cv(Clock, RMessageClock)
-        end;
+	    message_clock(Id, MessageInfo, Clock, ?message_delivered);
       {message_delivered, #message_event{message = #message{id = Id}}} ->
-        message_clock(Id, MessageInfo, Clock);
+        message_clock(Id, MessageInfo, Clock, ?message_sent);
       _ -> Clock
     end,
   add_pre_message_clocks(Specials, MessageInfo, NewClock).
 
-message_clock(Id, MessageInfo, ActorClock) ->
-  case ets:lookup_element(MessageInfo, Id, ?message_sent) of
+message_clock(Id, MessageInfo, ActorClock, MessageType) ->
+  case ets:lookup_element(MessageInfo, Id, MessageType) of
     undefined -> ActorClock;
-    MessageClock -> max_cv(ActorClock, MessageClock)
+    MessageClock ->
+	  %case MessageType of
+	  %?message_sent ->
+      % io:format("MessageClock ~p ~n ActorClock ~p ~n max_cv ~p ~n~n", 
+      %     [MessageClock, ActorClock, max_cv(ActorClock, MessageClock)]);
+	  % _ -> io:format("")
+	  %end,
+	  max_cv(ActorClock, MessageClock)
   end.
 
 % This function updates the vector clock map for the events
