@@ -395,7 +395,7 @@ plan_more_interleavings([], OldTrace, _SchedulerState) ->
 % I believe the reson for this is to remove unnecessary races 
 % between message_receive and message_delivered. Thus message_delivered
 % is just ignored.
-plan_more_interleavings([TraceState|Rest] = Trace, OldTrace, State) ->
+plan_more_interleavings([TraceState|Rest] = Trace, OldTraces, State) ->
   #scheduler_state{
      logger = _Logger,
      non_racing_system = NonRacingSystem
@@ -420,16 +420,16 @@ plan_more_interleavings([TraceState|Rest] = Trace, OldTrace, State) ->
   
   case Skip of
     true ->
-      plan_more_interleavings(Rest, [TraceState|OldTrace], State);
+      plan_more_interleavings(Rest, [TraceState|OldTraces], State);
     false ->
-      BaseClock = update_actor_clock(Event, State, OldTrace),
+      BaseClock = update_actor_clock(Event, State, OldTraces),
 	  
       ?debug(_Logger, "~s~n", [?pretty_s(_Index, Event)]),
       GState = State#scheduler_state{current_graph_ref = Ref},
 	  
 	  % Do the actual planning.	 
       BaseNewOldTrace = more_interleavings_for_event(
-						  OldTrace, Event, Rest, BaseClock, GState),
+						  OldTraces, Event, Rest, BaseClock, GState),
       plan_more_interleavings(Rest, [TraceState|BaseNewOldTrace], State)
   end.
 
@@ -481,8 +481,8 @@ print_debug(blue, Msg) ->
 
 	
 
-more_interleavings_for_event(OldTrace, Event, Later, Clock, State) ->
-  more_interleavings_for_event(OldTrace, Event, Later, Clock, State, []).
+more_interleavings_for_event(OldTraces, Event, Later, Clock, State) ->
+  more_interleavings_for_event(OldTraces, Event, Later, Clock, State, []).
 
 more_interleavings_for_event([], _Event, _Later, _Clock, _State, NewOldTrace) ->
   lists:reverse(NewOldTrace);
@@ -490,7 +490,7 @@ more_interleavings_for_event([], _Event, _Later, _Clock, _State, NewOldTrace) ->
 % Go through all previous tarce states (OldTraceStates) and see if any of those events 
 % are causaly related with the given event (Event).
 more_interleavings_for_event(
-  	[TraceState|Rest] = OldTraceStates, Event, 
+  	[TraceState|Rest] = OldTraces, Event, 
 	Later, Clock, State, NewOldTrace) ->
   
   #scheduler_state{
@@ -512,9 +512,7 @@ more_interleavings_for_event(
   Action = case EarlyIndex > EarlyClock of
       false -> none;
       true ->
-        Dependent =
-          concuerror_dependencies:dependent_safe(EarlyEvent, Event),
-        case Dependent of
+        case concuerror_dependencies:dependent_safe(EarlyEvent, Event) of
           false -> none;
           irreversible ->
             NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
@@ -536,7 +534,7 @@ more_interleavings_for_event(
     case Action of
       none -> {[TraceState|NewOldTrace], Clock};
       {update_clock, C} -> {[TraceState|NewOldTrace], C};
-      {update, S, C} -> if State#scheduler_state.show_races ->
+      {update, T, C} -> if State#scheduler_state.show_races ->
             ?unique(Logger, ?lrace,
                "You can disable race pair messages with '--show_races false'~n",
                []),
@@ -547,7 +545,7 @@ more_interleavings_for_event(
            true -> ok
         end,
 		print_debug(green, ["Race Detected"]),
-        {S, C}
+        {T, C}
     end,
   more_interleavings_for_event(Rest, Event, Later, NewClock, State, NewTrace).
 
@@ -884,29 +882,86 @@ replay_prefix_aux([#trace_state{done = [Event|_], index = I}|Rest], State) ->
 %% =============================================================================
 
 schedule_sort([], _State) -> [];
-schedule_sort(Actors, State) ->
+schedule_sort(
+  Actors,   
   #scheduler_state{
      last_scheduled = LastScheduled,
      scheduling = Scheduling,
      strict_scheduling = StrictScheduling
-    } = State,
-  Sorted =
-    case Scheduling of
-      oldest -> Actors;
-      newest -> lists:reverse(Actors);
-      round_robin ->
-        Split = fun(E) -> E =/= LastScheduled end,    
-        {Pre, Post} = lists:splitwith(Split, Actors),
-        Post ++ Pre
-    end,
+  } = _State) when Scheduling =:= oldest ->
+  
+  Sorted = Actors,
+
   case StrictScheduling of
-    true when Scheduling =:= round_robin ->
+    false -> [LastScheduled|lists:delete(LastScheduled, Sorted)];
+    _ -> Sorted
+  end;
+
+
+schedule_sort([], _State) -> [];
+schedule_sort(
+  Actors,   
+  #scheduler_state{
+     last_scheduled = LastScheduled,
+     scheduling = Scheduling,
+     strict_scheduling = StrictScheduling
+  } = _State) when Scheduling =:= newest->
+  
+  Sorted = lists:rverse(Actors),
+
+  case StrictScheduling of
+    false -> [LastScheduled|lists:delete(LastScheduled, Sorted)];
+    _ -> Sorted
+  end;
+
+schedule_sort([], _State) -> [];
+schedule_sort(
+  Actors,   
+  #scheduler_state{
+     last_scheduled = LastScheduled,
+     scheduling = Scheduling,
+     strict_scheduling = StrictScheduling
+  } = _State) when Scheduling =:= round_robin->
+  
+
+  Split = fun(E) -> E =/= LastScheduled end,    
+  {Pre, Post} = lists:splitwith(Split, Actors),
+  Sorted = Post ++ Pre,
+
+  case StrictScheduling of
+    true ->
       [LastScheduled|Rest] = Sorted,
       Rest ++ [LastScheduled];
-    false when Scheduling =/= round_robin ->
-      [LastScheduled|lists:delete(LastScheduled, Sorted)];
-    _ -> Sorted
+    _ -> 
+	  Sorted
   end.
+
+%schedule_sort([], _State) -> [];
+%schedule_sort(
+%  Actors,   
+%  #scheduler_state{
+%     last_scheduled = LastScheduled,
+%     scheduling = Scheduling,
+%     strict_scheduling = StrictScheduling
+%  } = _State) ->
+%  
+%  Sorted =
+%    case Scheduling of
+%      oldest -> Actors;
+%      newest -> lists:reverse(Actors);
+%      round_robin ->
+%        Split = fun(E) -> E =/= LastScheduled end,    
+%        {Pre, Post} = lists:splitwith(Split, Actors),
+%        Post ++ Pre
+%    end,
+%  case StrictScheduling of
+%    true when Scheduling =:= round_robin ->
+%      [LastScheduled|Rest] = Sorted,
+%      Rest ++ [LastScheduled];
+%    false when Scheduling =/= round_robin ->
+%      [LastScheduled|lists:delete(LastScheduled, Sorted)];
+%    _ -> Sorted
+%  end.
 
 
 %% =============================================================================
@@ -1139,26 +1194,23 @@ message_clock(Id, MessageInfo, ActorClock, MessageType) ->
 update_clock([], _Event, Clock, _State) ->
   Clock;
 
-update_clock([TraceState|Rest], #event{actor = AC} = Event, Clock, State) ->
+update_clock([TraceState|Rest], Event, ActorClock, State) ->
+  
+  #scheduler_state{
+    assume_racing = AssumeRacing
+  } = State,
   
   #trace_state{
      done = [#event{actor = EarlyActor} = EarlyEvent|_],
+	 clock_map = ClockMap,
      index = EarlyIndex
     } = TraceState,
    
-  EarlyClock = lookup_clock_value(EarlyActor, Clock),
-  
-  %io:format("EarlyEvent     -> ~p~n", [EarlyEvent]),
-  %io:format("Event          -> ~p~n", [Event]),
-
-  %io:format("AC             -> ~p~n", [AC]),
-  %io:format("EarlyActor     -> ~p~n", [EarlyActor]),
-  %io:format("Index Clock    -> ~p ~p~n", [EarlyIndex, EarlyClock]),
+  EarlyClock = lookup_clock_value(EarlyActor, ActorClock),
 
   NewClock = case EarlyIndex > EarlyClock of
-      false -> Clock;
+      false -> ActorClock;
       true ->
-        #scheduler_state{assume_racing = AssumeRacing} = State,
         Dependent =
           concuerror_dependencies:dependent(EarlyEvent, Event, AssumeRacing),
         ?trace(State#scheduler_state.logger,
@@ -1168,16 +1220,22 @@ update_clock([TraceState|Rest], #event{actor = AC} = Event, Clock, State) ->
                  [Star(Dependent), ?pretty_s(EarlyIndex,EarlyEvent)]
                end),
         case Dependent of
-          false -> Clock;
+          false -> ActorClock;
           True when True =:= true; True =:= irreversible ->
-            #trace_state{clock_map = ClockMap} = TraceState,
             EarlyActorClock = lookup_clock(EarlyActor, ClockMap),
 			%io:format("Dependent    -> ~p~n", [EarlyActorClock]),
 
             max_cv(
-              Clock, orddict:store(EarlyActor, EarlyIndex, EarlyActorClock))
+              ActorClock, orddict:store(EarlyActor, EarlyIndex, EarlyActorClock))
         end
-    end,
+    end,  
+  
+  %io:format("EarlyEvent     -> ~p~n", [EarlyEvent]),
+  %io:format("Event          -> ~p~n", [Event]),
+
+  %io:format("AC             -> ~p~n", [AC]),
+  %io:format("EarlyActor     -> ~p~n", [EarlyActor]),
+  %io:format("Index Clock    -> ~p ~p~n", [EarlyIndex, EarlyClock]),
   
   update_clock(Rest, Event, NewClock, State).
 

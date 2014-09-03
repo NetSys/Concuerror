@@ -30,6 +30,7 @@ dependent_safe(E1, E2) ->
 
 dependent(#event{actor = A}, #event{actor = A}, _) ->
   irreversible;
+
 dependent(#event{event_info = Info1, special = Special1},
           #event{event_info = Info2, special = Special2},
           AssumeRacing) ->
@@ -37,7 +38,7 @@ dependent(#event{event_info = Info1, special = Special1},
   M2 = [M || {message_delivered, M} <- Special2],
   try
     lists:any(fun({A,B}) -> dependent(A,B) end,
-              [{I1,I2}|| I1 <- [Info1|M1], I2 <- [Info2|M2]])
+              [{I1,I2} || I1 <- [Info1|M1], I2 <- [Info2|M2]])
   catch
     throw:irreversible -> irreversible;
     Class:Reason ->
