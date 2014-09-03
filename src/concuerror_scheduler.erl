@@ -936,33 +936,6 @@ schedule_sort(
 	  Sorted
   end.
 
-%schedule_sort([], _State) -> [];
-%schedule_sort(
-%  Actors,   
-%  #scheduler_state{
-%     last_scheduled = LastScheduled,
-%     scheduling = Scheduling,
-%     strict_scheduling = StrictScheduling
-%  } = _State) ->
-%  
-%  Sorted =
-%    case Scheduling of
-%      oldest -> Actors;
-%      newest -> lists:reverse(Actors);
-%      round_robin ->
-%        Split = fun(E) -> E =/= LastScheduled end,    
-%        {Pre, Post} = lists:splitwith(Split, Actors),
-%        Post ++ Pre
-%    end,
-%  case StrictScheduling of
-%    true when Scheduling =:= round_robin ->
-%      [LastScheduled|Rest] = Sorted,
-%      Rest ++ [LastScheduled];
-%    false when Scheduling =/= round_robin ->
-%      [LastScheduled|lists:delete(LastScheduled, Sorted)];
-%    _ -> Sorted
-%  end.
-
 
 %% =============================================================================
 %% UPDATE FUNCTIONS
