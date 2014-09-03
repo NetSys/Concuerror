@@ -465,19 +465,6 @@ update_actor_clock(Event, SchedState, OldTrace) ->
   %  true -> io:format("Done ~p~n", [Done]);
   %  false -> ok
   %end,
-  
-  
-print_debug(red, Msg) ->
-  io:format("\e[1;31m~p\e[m~n~n", Msg);
-
-print_debug(green, Msg) ->
-  io:format("\e[1;32m~p\e[m~n~n", Msg);
-
-print_debug(yellow, Msg) ->
-  io:format("\e[1;33m~p\e[m~n~n", Msg);
-
-print_debug(blue, Msg) ->
-  io:format("\e[1;34m~p\e[m~n~n", Msg).
 
 	
 
@@ -490,7 +477,7 @@ more_interleavings_for_event([], _Event, _Later, _Clock, _State, NewOldTrace) ->
 % Go through all previous tarce states (OldTraceStates) and see if any of those events 
 % are causaly related with the given event (Event).
 more_interleavings_for_event(
-  	[TraceState|Rest] = OldTraces, Event, 
+  	[TraceState|Rest] = _OldTraces, Event, 
 	Later, Clock, State, NewOldTrace) ->
   
   #scheduler_state{
@@ -598,10 +585,6 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
     update_clock(RevLate++RevEarly, Event, BaseHappenedBeforeClock, State),
   
   maybe_mark_sent_message(Special, HappenedBeforeClock, MessageInfo),
-    
-  %io:format("BaseHappenedBeforeClock  -> ~p~n", [BaseHappenedBeforeClock]),
-  %io:format("HappenedBeforeClock  -> ~p~n", [HappenedBeforeClock]),
-  %io:format("Special        -> ~p~n", [Special]),
 
   case proplists:lookup(message_delivered, Special) of
     none -> true;
@@ -641,6 +624,7 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   %io:format("MessageInfo    -> ~p~n", [MessageInfo]),
   
   assign_happens_before(Later, [NewTraceState|RevLate], RevEarly, State).
+
 
 
 % Filter non-dependent events.
@@ -938,7 +922,7 @@ schedule_sort(
 
 
 %% =============================================================================
-%% UPDATE FUNCTIONS
+%% UPDATE FUNCTIONS	
 %% =============================================================================
 
 % Move things along in the Wakeup Tree and record other things
@@ -1113,7 +1097,7 @@ get_base_clock(RevLate, RevEarly) ->
 get_base_clock([]) -> throw(none);
 get_base_clock([#trace_state{clock_map = ClockMap}|_]) -> ClockMap.
 
-% Go through 'Specials' and for each event and if it's:
+% Go through 'Specials' and for each event that's of type:
 % 
 % Message_delivered:
 % See if this message has been previously sent. If it has, this means that it
@@ -1125,6 +1109,7 @@ get_base_clock([#trace_state{clock_map = ClockMap}|_]) -> ClockMap.
 %
 % All messages events have the following causal relationship:
 %  Message Sent -> Message Delivered -> Message Received.  
+
 add_pre_message_clocks([], _, Clock) -> Clock;
 add_pre_message_clocks([Special|Specials], MessageInfo, Clock) ->
   NewClock =
@@ -1140,34 +1125,23 @@ add_pre_message_clocks([Special|Specials], MessageInfo, Clock) ->
 message_clock(Id, MessageInfo, ActorClock, MessageType) ->
   case ets:lookup_element(MessageInfo, Id, MessageType) of
     undefined -> ActorClock;
-    MessageClock ->
-	  %case MessageType of
-	  %?message_sent ->
-      % io:format("MessageClock ~p ~n ActorClock ~p ~n max_cv ~p ~n~n", 
-      %     [MessageClock, ActorClock, max_cv(ActorClock, MessageClock)]);
-	  % _ -> io:format("")
-	  %end,
-	  max_cv(ActorClock, MessageClock)
+    MessageClock -> max_cv(ActorClock, MessageClock)
   end.
 
-% This function updates the vector clock map for the events
-% that are dependent.
-% Example:
-% Input  -> [{<0.53.0>,8},
-%            {<0.62.0>,21},
-%            {{<0.38.0>,<0.53.0>},5},
-%            {{<0.53.0>,<0.38.0>},4},
-%            {{<0.62.0>,<0.38.0>},22}]
-% Output  -> [{<0.53.0>,17},
-%             {<0.62.0>,21},
-%             {{<0.38.0>,<0.53.0>},5},
-%             {{<0.53.0>,<0.38.0>},18},
-%             {{<0.62.0>,<0.38.0>},22}]
+% This function iterates through all old trace states, and checks to see
+% if any of those earlier events are dependent on the CurrentEvent.
+%
+% If FALSE, just pass the exisintg CurrentActorClock the the next recursive call.
+%
+% If TRUE, take the EarlyActorClock and merge it with the CurrentActorClock
+% Pass the result to the next recursive call as a new CurrentActorClock.
+%
+% This function effectively defines 'happened before' relation.
 
-update_clock([], _Event, Clock, _State) ->
-  Clock;
+update_clock([], _Event, ActorClock, _State) ->
+  ActorClock;
 
-update_clock([TraceState|Rest], Event, ActorClock, State) ->
+update_clock([TraceState|Rest], CurrentEvent, CurrentActorClock, State) ->
   
   #scheduler_state{
     assume_racing = AssumeRacing
@@ -1179,38 +1153,27 @@ update_clock([TraceState|Rest], Event, ActorClock, State) ->
      index = EarlyIndex
     } = TraceState,
    
-  EarlyClock = lookup_clock_value(EarlyActor, ActorClock),
+  EarlyClock = lookup_clock_value(EarlyActor, CurrentActorClock),
 
   NewClock = case EarlyIndex > EarlyClock of
-      false -> ActorClock;
+      false -> CurrentActorClock;
       true ->
-        Dependent =
-          concuerror_dependencies:dependent(EarlyEvent, Event, AssumeRacing),
-        ?trace(State#scheduler_state.logger,
-               "    ~s ~s~n",
-               begin
-                 Star = fun(false) -> " ";(_) -> "*" end,
-                 [Star(Dependent), ?pretty_s(EarlyIndex,EarlyEvent)]
-               end),
+        Dependent = concuerror_dependencies:dependent(
+					  EarlyEvent, CurrentEvent, AssumeRacing),
+		print_trace(State, TraceState),
+		
         case Dependent of
-          false -> ActorClock;
+          false -> CurrentActorClock;
           True when True =:= true; True =:= irreversible ->
             EarlyActorClock = lookup_clock(EarlyActor, ClockMap),
-			%io:format("Dependent    -> ~p~n", [EarlyActorClock]),
-
-            max_cv(
-              ActorClock, orddict:store(EarlyActor, EarlyIndex, EarlyActorClock))
+            max_cv(CurrentActorClock, 
+				   orddict:store(EarlyActor, EarlyIndex, EarlyActorClock))
         end
-    end,  
+    end,
   
-  %io:format("EarlyEvent     -> ~p~n", [EarlyEvent]),
-  %io:format("Event          -> ~p~n", [Event]),
+  update_clock(Rest, CurrentEvent, NewClock, State).
 
-  %io:format("AC             -> ~p~n", [AC]),
-  %io:format("EarlyActor     -> ~p~n", [EarlyActor]),
-  %io:format("Index Clock    -> ~p ~p~n", [EarlyIndex, EarlyClock]),
-  
-  update_clock(Rest, Event, NewClock, State).
+
 
 maybe_mark_sent_message(Special, Clock, MessageInfo) when is_list(Special)->
   Message = proplists:lookup(message, Special),
@@ -1473,3 +1436,34 @@ msg(timeout) ->
     " that exceed some threshold as 'impossible'.~n";
 msg(treat_as_normal) ->
   "Some abnormal exit reasons were treated as normal (--treat_as_normal).~n".
+
+
+  
+  
+print_debug(red, Msg) ->
+  io:format("\e[1;31m~p\e[m~n~n", Msg);
+
+print_debug(green, Msg) ->
+  io:format("\e[1;32m~p\e[m~n~n", Msg);
+
+print_debug(yellow, Msg) ->
+  io:format("\e[1;33m~p\e[m~n~n", Msg);
+
+print_debug(blue, Msg) ->
+  io:format("\e[1;34m~p\e[m~n~n", Msg).
+
+
+print_trace(SchedState, TraceState) ->
+  
+  #trace_state{
+     done = [EarlyEvent|_],
+	 clock_map = ClockMap,
+     index = EarlyIndex
+    } = TraceState,
+  
+   ?trace(SchedState#scheduler_state.logger,
+   	 "    ~s ~s~n",
+     begin
+  	    Star = fun(false) -> " ";(_) -> "*" end,
+  	    [Star(Dependent), ?pretty_s(EarlyIndex, EarlyEvent)]
+ 	 end).
