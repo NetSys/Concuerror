@@ -500,7 +500,7 @@ more_interleavings_for_event(
       false -> none;
       true ->
         case concuerror_dependencies:dependent_safe(EarlyEvent, Event) of
-          false -> none;
+          false -> none;	
           irreversible ->
             NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
             {update_clock, NC};
@@ -578,28 +578,17 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   OldClock = lookup_clock(Actor, ClockMap),
   ActorClock = orddict:store(Actor, Index, OldClock),
   
-  BaseHappenedBeforeClock =
-    add_pre_message_clocks(Special, MessageInfo, ActorClock),
   
-  HappenedBeforeClock =
-    update_clock(RevLate++RevEarly, Event, BaseHappenedBeforeClock, State),
+  BaseHappenedBeforeClock = add_pre_message_clocks(
+	    Special, MessageInfo, ActorClock),
+  
+  HappenedBeforeClock = happens_before_clock(
+		RevLate++RevEarly, Event, BaseHappenedBeforeClock, State),
   
   maybe_mark_sent_message(Special, HappenedBeforeClock, MessageInfo),
-
-  case proplists:lookup(message_delivered, Special) of
-    none -> true;
-    {message_delivered, MessageEvent} ->
-      #message_event{message = #message{id = Id}} = MessageEvent,
-      Delivery = {?message_delivered, HappenedBeforeClock},
-      ets:update_element(MessageInfo, Id, Delivery)
-  end,
+  maybe_mark_delivered_message(Special, HappenedBeforeClock, MessageInfo),
   
-  BaseNewClockMap = dict:store(Actor, HappenedBeforeClock, ClockMap),
-  NewClockMap = case proplists:lookup(new, Special) of
-      {new, SpawnedPid} ->
-        dict:store(SpawnedPid, HappenedBeforeClock, BaseNewClockMap);
-      none -> BaseNewClockMap
-    end,
+  NewClockMap = new_clock_map(Event, HappenedBeforeClock, ClockMap),
   
   % 'State Clock' keeps track of each actor and its logical clock. 
   StateClock = lookup_clock(state, ClockMap),
@@ -612,19 +601,22 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   NewTraceState = TraceState#trace_state{
       clock_map = FinalClockMap,
       done = [Event|RestEvents]},
-    
-  %io:format("================================~n"),
-  %io:format("Actor          -> ~p~n", [Actor]),
-  %io:format("Event Location -> ~p~n", [Location]),
-  %io:format("ClockMap Keys  -> ~p~n", [dict:fetch_keys(ClockMap)]),
-  %io:format("HB             -> ~s~n", [?pretty_s(Index,Event)]),
-  %io:format("HB             -> ~p~n", [Event]),
-  %io:format("OldClock       -> ~p~n", [OldClock]),
-  %io:format("ActorClock      -> ~p~n", [ActorClock]),
-  %io:format("MessageInfo    -> ~p~n", [MessageInfo]),
   
   assign_happens_before(Later, [NewTraceState|RevLate], RevEarly, State).
 
+
+new_clock_map(Event, HappenedBeforeClock, ClockMap) ->
+  #event{
+	actor = Actor,
+	special = Special
+  } = Event,
+
+  BaseNewClockMap = dict:store(Actor, HappenedBeforeClock, ClockMap),
+  case proplists:lookup(new, Special) of
+      {new, SpawnedPid} ->
+        dict:store(SpawnedPid, HappenedBeforeClock, BaseNewClockMap);
+      none -> BaseNewClockMap
+    end.
 
 
 % Filter non-dependent events.
@@ -1109,7 +1101,7 @@ get_base_clock([#trace_state{clock_map = ClockMap}|_]) -> ClockMap.
 %
 % All messages events have the following causal relationship:
 %  Message Sent -> Message Delivered -> Message Received.  
-
+%
 add_pre_message_clocks([], _, Clock) -> Clock;
 add_pre_message_clocks([Special|Specials], MessageInfo, Clock) ->
   NewClock =
@@ -1125,7 +1117,7 @@ add_pre_message_clocks([Special|Specials], MessageInfo, Clock) ->
 message_clock(Id, MessageInfo, ActorClock, MessageType) ->
   case ets:lookup_element(MessageInfo, Id, MessageType) of
     undefined -> ActorClock;
-    MessageClock -> max_cv(ActorClock, MessageClock)
+    HappenedBeforeClock -> max_cv(ActorClock, HappenedBeforeClock)
   end.
 
 % This function iterates through all old trace states, and checks to see
@@ -1136,12 +1128,12 @@ message_clock(Id, MessageInfo, ActorClock, MessageType) ->
 % If TRUE, take the EarlyActorClock and merge it with the CurrentActorClock
 % Pass the result to the next recursive call as a new CurrentActorClock.
 %
-% This function effectively defines 'happened before' relation.
+% This function effectively creates 'happens before' clock for the CurrentEvent.
 
-update_clock([], _Event, ActorClock, _State) ->
+happens_before_clock([], _Event, ActorClock, _State) ->
   ActorClock;
 
-update_clock([TraceState|Rest], CurrentEvent, CurrentActorClock, State) ->
+happens_before_clock([TraceState|Rest], CurrentEvent, CurrentActorClock, State) ->
   
   #scheduler_state{
     assume_racing = AssumeRacing
@@ -1171,17 +1163,32 @@ update_clock([TraceState|Rest], CurrentEvent, CurrentActorClock, State) ->
         end
     end,
   
-  update_clock(Rest, CurrentEvent, NewClock, State).
+  happens_before_clock(Rest, CurrentEvent, NewClock, State).
 
 
+maybe_mark_delivered_message(Special, HappenedBeforeClock, MessageInfo) ->
+  case proplists:lookup(message_delivered, Special) of
+    none -> true;
+    {message_delivered, MessageEvent} ->
+      #message_event{message = #message{id = Id}} = MessageEvent,
+      Delivery = {?message_delivered, HappenedBeforeClock},
+      ets:update_element(MessageInfo, Id, Delivery)
+  end.
 
-maybe_mark_sent_message(Special, Clock, MessageInfo) when is_list(Special)->
+% Remember, there are three special types of message events:
+% {message, ...}, {message_delivered, ...}, {message_received, ...}
+%
+% If any of types is {message, ...}, this means that a new message has
+% been sent. Conseqently, update the ETS with 'Id' and 'HappenedBeforeClock'.
+maybe_mark_sent_message(Special, HappenedBeforeClock, MessageInfo) 
+  						when is_list(Special)->
+  io:format("Special ~p~n", [Special]),
   Message = proplists:lookup(message, Special),
-  maybe_mark_sent_message(Message, Clock, MessageInfo);
+  maybe_mark_sent_message(Message, HappenedBeforeClock, MessageInfo);
 
-maybe_mark_sent_message({message, Message}, Clock, MessageInfo) ->
+maybe_mark_sent_message({message, Message}, HappenedBeforeClock, MessageInfo) ->
   #message_event{message = #message{id = Id}} = Message,
-  ets:update_element(MessageInfo, Id, {?message_sent, Clock});
+  ets:update_element(MessageInfo, Id, {?message_sent, HappenedBeforeClock});
 
 maybe_mark_sent_message(_, _, _) -> true.
 
