@@ -10,7 +10,7 @@
 %%-define(DEBUG, true).
 -define(CHECK_ASSERTIONS, true).
 -include("concuerror.hrl").
-
+-include_lib("eunit/include/eunit.hrl").
 %%------------------------------------------------------------------------------
 
 %% -type clock_vector() :: orddict:orddict(). %% orddict(pid(), index()).
@@ -455,19 +455,7 @@ update_actor_clock(Event, SchedState, OldTrace) ->
       message_clock(Id, MessageInfo, ActorClock, ?message_sent);
     false -> ActorClock
   end.
-
-  %io:format("ClockMap    ~p~n",  [ClockMap]),
-  %io:format("StateClock  ~p~n",  [StateClock]),
-  %io:format("ActorLast   ~p~n",  [ActorLast]),
-  %io:format("ActorClock  ~p~n",  [ActorClock]),
-  %io:format("BaseClock   ~p~n",  [BaseClock]),
-  %case length(Done) > 1 of
-  %  true -> io:format("Done ~p~n", [Done]);
-  %  false -> ok
-  %end,
-
 	
-
 more_interleavings_for_event(OldTraces, Event, Later, Clock, State) ->
   more_interleavings_for_event(OldTraces, Event, Later, Clock, State, []).
 
@@ -578,7 +566,6 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   OldClock = lookup_clock(Actor, ClockMap),
   ActorClock = orddict:store(Actor, Index, OldClock),
   
-  
   BaseHappenedBeforeClock = add_pre_message_clocks(
 	    Special, MessageInfo, ActorClock),
   
@@ -588,24 +575,45 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   maybe_mark_sent_message(Special, HappenedBeforeClock, MessageInfo),
   maybe_mark_delivered_message(Special, HappenedBeforeClock, MessageInfo),
   
-  NewClockMap = new_clock_map(Event, HappenedBeforeClock, ClockMap),
-  
-  % 'State Clock' keeps track of each actor and its logical clock. 
-  StateClock = lookup_clock(state, ClockMap),
-  OldActorClock = lookup_clock_value(Actor, StateClock),
-  FinalActorClock = orddict:store(Actor, OldActorClock, HappenedBeforeClock),
-  FinalStateClock = orddict:store(Actor, Index, StateClock),
-  FinalClockMap = dict:store(
-      Actor, FinalActorClock,
-      dict:store(state, FinalStateClock, NewClockMap)),
-  NewTraceState = TraceState#trace_state{
-      clock_map = FinalClockMap,
-      done = [Event|RestEvents]},
+  NewClockMap = update_clock_map(
+				  Event, HappenedBeforeClock, ClockMap),
+  NewTraceState = update_trace_state(
+					Event, TraceState, HappenedBeforeClock, NewClockMap),
   
   assign_happens_before(Later, [NewTraceState|RevLate], RevEarly, State).
 
 
-new_clock_map(Event, HappenedBeforeClock, ClockMap) ->
+update_trace_state(Event, TraceState, HappenedBeforeClock, NewClockMap) ->
+  
+  #trace_state{
+    done = [Event|RestEvents],
+	index = Index
+  } = TraceState,
+  
+  #event{
+	actor = Actor
+  } = Event,
+	
+  % 'State Clock' keeps track of each actor and its logical clock. 
+  StateClock = lookup_clock(state, NewClockMap),
+  
+  % Make this Event a part of the HappenedBeforeClock.
+  OldActorClock = lookup_clock_value(Actor, StateClock),
+  FinalHappenedBeforeClock = orddict:store(Actor, OldActorClock, HappenedBeforeClock),
+  
+  FinalStateClock = orddict:store(Actor, Index, StateClock),
+  FinalClockMap = dict:store(
+      Actor, FinalHappenedBeforeClock,
+      dict:store(state, FinalStateClock, NewClockMap)),
+	
+  TraceState#trace_state{
+      clock_map = FinalClockMap,
+      done = [Event|RestEvents]}.
+
+% Associate HappenedBeforeClock with the current Actor and store it
+% in the ClockMap. Also, if this events spawns a new process, make
+% sure to also associate the same HappenedBeforeClock with the new PID.
+update_clock_map(Event, HappenedBeforeClock, ClockMap) ->
   #event{
 	actor = Actor,
 	special = Special
@@ -1182,7 +1190,6 @@ maybe_mark_delivered_message(Special, HappenedBeforeClock, MessageInfo) ->
 % been sent. Conseqently, update the ETS with 'Id' and 'HappenedBeforeClock'.
 maybe_mark_sent_message(Special, HappenedBeforeClock, MessageInfo) 
   						when is_list(Special)->
-  io:format("Special ~p~n", [Special]),
   Message = proplists:lookup(message, Special),
   maybe_mark_sent_message(Message, HappenedBeforeClock, MessageInfo);
 
