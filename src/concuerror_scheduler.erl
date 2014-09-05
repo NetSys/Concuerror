@@ -24,6 +24,20 @@
 
 -type event_tree() :: [{event(), event_tree()}].
 
+% It's worth explaining what 'trace_state' is within this context
+% Basically, for every BIF (jiffie) add a 'trace state' that contains:
+%   * All actors seen thus far.
+%   * A vector clock associated with each actor stating when it executed.
+%   * Events that have just finished executing (Done).
+%
+% 'Done' might not be a single event, it can also take form of:
+% {receive_event, Special = [message_received]}, 
+% {message_event, Special = [message_delivered, message_received, 
+%                           system_communication, message]}
+% 
+% I believe the reson for this is to remove unnecessary races 
+% between message_receive and message_delivered. Thus message_delivered
+% is just ignored.
 -record(trace_state, {
           actors      = []         :: [pid() | {channel(), queue()}],
           clock_map   = dict:new() :: clock_map(),
@@ -378,24 +392,13 @@ plan_more_interleavings(State) ->
 
 
 % (Events in order, New Trace, Scheduler State)
-plan_more_interleavings([], OldTrace, _SchedulerState) ->
-  OldTrace;
+plan_more_interleavings([], ExploredTraces, _SchedulerState) ->
+  ExploredTraces;
 
-% It's worth explaining what 'trace_state' is within this context
-% Basically, for every BIF (jiffie) add a 'trace state' that contains:
-%   * All actors seen thus far.
-%   * A vector clock associated with each actor stating when it executed.
-%   * Events that have just finished executing (Done).
-%
-% 'Done' might not be a single event, it can also take form of:
-% {receive_event, Special = [message_received]}, 
-% {message_event, Special = [message_delivered, message_received, 
-%                           system_communication, message]}
-% 
-% I believe the reson for this is to remove unnecessary races 
-% between message_receive and message_delivered. Thus message_delivered
-% is just ignored.
-plan_more_interleavings([TraceState|Rest] = Trace, OldTraces, State) ->
+
+plan_more_interleavings([TraceState|Rest] = _UnexploredTraces, 
+						ExploredTraces, State) ->
+  
   #scheduler_state{
      logger = _Logger,
      non_racing_system = NonRacingSystem
@@ -413,6 +416,8 @@ plan_more_interleavings([TraceState|Rest] = Trace, OldTraces, State) ->
   } = Event,
   
   % Should we skip trying to find interleavings of this event.
+  % On the command line we can specify --non_racing_system which
+  % causes the framework to ignore races for that specific module.
   Skip = case proplists:lookup(system_communication, Special) of
       {system_communication, System} -> lists:member(System, NonRacingSystem);
       none -> false
@@ -420,16 +425,14 @@ plan_more_interleavings([TraceState|Rest] = Trace, OldTraces, State) ->
   
   case Skip of
     true ->
-      plan_more_interleavings(Rest, [TraceState|OldTraces], State);
+      plan_more_interleavings(Rest, [TraceState|ExploredTraces], State);
     false ->
-      BaseClock = update_actor_clock(Event, State, OldTraces),
-	  
-      ?debug(_Logger, "~s~n", [?pretty_s(_Index, Event)]),
+      BaseClock = update_actor_clock(Event, State, ExploredTraces),
       GState = State#scheduler_state{current_graph_ref = Ref},
 	  
 	  % Do the actual planning.	 
       BaseNewOldTrace = more_interleavings_for_event(
-						  OldTraces, Event, Rest, BaseClock, GState),
+						  ExploredTraces, Event, Rest, BaseClock, GState),
       plan_more_interleavings(Rest, [TraceState|BaseNewOldTrace], State)
   end.
 
@@ -456,73 +459,78 @@ update_actor_clock(Event, SchedState, OldTrace) ->
     false -> ActorClock
   end.
 	
-more_interleavings_for_event(OldTraces, Event, Later, Clock, State) ->
-  more_interleavings_for_event(OldTraces, Event, Later, Clock, State, []).
+more_interleavings_for_event(ExploredTraces, Event, Later, Clock, State) ->
+  more_interleavings_for_event(ExploredTraces, Event, Later, Clock, State, []).
 
 more_interleavings_for_event([], _Event, _Later, _Clock, _State, NewOldTrace) ->
   lists:reverse(NewOldTrace);
 
-% Go through all previous tarce states (OldTraceStates) and see if any of those events 
+% Go through all previous tarce states (ExploredTraces) and see if any of those events 
 % are causaly related with the given event (Event).
 more_interleavings_for_event(
-  	[TraceState|Rest] = _OldTraces, Event, 
-	Later, Clock, State, NewOldTrace) ->
+  	[TraceState|Rest] = _ExploredTraces, Event, 
+	Later, Clock, SchedState, NewOldTrace) ->
   
   #scheduler_state{
 	  logger = Logger
-	} = State,
+	} = SchedState,
   
   #trace_state{
-     clock_map = EarlyClockMap,
      done = [#event{actor = EarlyActor} = EarlyEvent|_],
      index = EarlyIndex
     } = TraceState,
   
-  #event{actor = _Actor} = Event,
+  #event{
+    actor = _Actor
+  } = Event,
   
-  %io:format("OldTrace  ~p~n",  [length(OldTrace)]),
-  %io:format("EarlyEvent  ~p~n",  [EarlyEvent]),
   
   EarlyClock = lookup_clock_value(EarlyActor, Clock),
   Action = case EarlyIndex > EarlyClock of
       false -> none;
-      true ->
-        case concuerror_dependencies:dependent_safe(EarlyEvent, Event) of
-          false -> none;	
-          irreversible ->
-            NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
-            {update_clock, NC};
-          true ->
-            ?debug(Logger, "   races with ~s~n",
-                   [?pretty_s(EarlyIndex, EarlyEvent)]),
-            NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
-            case update_trace(Event, TraceState, Later, NewOldTrace, State) of
-              skip -> {update_clock, NC};
-              UpdatedNewOldTrace ->
-                concuerror_logger:plan(Logger),
-                {update, UpdatedNewOldTrace, NC}
-            end
-        end
+      true -> dependent_action(TraceState, Event, Later, Clock, SchedState, NewOldTrace)
     end,
   
   {NewTrace, NewClock} =
     case Action of
       none -> {[TraceState|NewOldTrace], Clock};
       {update_clock, C} -> {[TraceState|NewOldTrace], C};
-      {update, T, C} -> if State#scheduler_state.show_races ->
-            ?unique(Logger, ?lrace,
-               "You can disable race pair messages with '--show_races false'~n",
-               []),
-            EarlyRef = TraceState#trace_state.graph_ref,
-            Ref = State#scheduler_state.current_graph_ref,
-            concuerror_logger:graph_race(Logger, EarlyRef, Ref),
-            concuerror_logger:race(Logger, EarlyEvent, Event);
-           true -> ok
-        end,
+      {update, T, C} ->
+		log_race(EarlyEvent, Event, SchedState, TraceState),
 		print_debug(green, ["Race Detected"]),
         {T, C}
     end,
-  more_interleavings_for_event(Rest, Event, Later, NewClock, State, NewTrace).
+  
+  more_interleavings_for_event(Rest, Event, Later, NewClock, SchedState, NewTrace).
+
+
+
+dependent_action(
+   	TraceState, Event, 
+	Later, Clock, State, NewOldTrace) ->
+  
+  #scheduler_state{logger = Logger} = State,
+  
+  #trace_state{
+     clock_map = EarlyClockMap,
+     done = [#event{actor = EarlyActor} = EarlyEvent|_]
+    } = TraceState,
+  
+  case concuerror_dependencies:dependent_safe(EarlyEvent, Event) of
+    false -> none;	
+    irreversible ->
+      NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
+      {update_clock, NC};
+    true ->
+      NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
+      case update_trace(Event, TraceState, Later, NewOldTrace, State) of
+        skip -> 
+		  {update_clock, NC};
+        UpdatedNewOldTrace ->
+          concuerror_logger:plan(Logger),
+          {update, UpdatedNewOldTrace, NC}
+      end
+end.
 
 %% =============================================================================
 %% CAUSAL ANALYSIS
@@ -542,10 +550,11 @@ more_interleavings_for_event(
 assign_happens_before(UntimedLate, RevEarly, State) ->
   assign_happens_before(UntimedLate, [], RevEarly, State).
 
-assign_happens_before([], RevLate, _RevEarly, _State) ->
-  lists:reverse(RevLate);
+assign_happens_before([], AlreadyExplored, _RevEarly, _State) ->
+  lists:reverse(AlreadyExplored);
 
-assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
+assign_happens_before([TraceState|Later] = _UntimedLate, 
+					  AlreadyExplored, RevEarly, State) ->
   
   #scheduler_state{
     logger = _Logger,
@@ -553,7 +562,7 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   } = State,
   
   #trace_state{
-    done = [Event|RestEvents],
+    done = [Event|_RestEvents],
 	index = Index
   } = TraceState,
   
@@ -562,7 +571,7 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
 	special = Special
   } = Event,
   
-  ClockMap = get_base_clock(RevLate, RevEarly),
+  ClockMap = get_base_clock(AlreadyExplored, RevEarly),
   OldClock = lookup_clock(Actor, ClockMap),
   ActorClock = orddict:store(Actor, Index, OldClock),
   
@@ -570,7 +579,7 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
 	    Special, MessageInfo, ActorClock),
   
   HappenedBeforeClock = happens_before_clock(
-		RevLate++RevEarly, Event, BaseHappenedBeforeClock, State),
+		AlreadyExplored++RevEarly, Event, BaseHappenedBeforeClock, State),
   
   maybe_mark_sent_message(Special, HappenedBeforeClock, MessageInfo),
   maybe_mark_delivered_message(Special, HappenedBeforeClock, MessageInfo),
@@ -580,7 +589,8 @@ assign_happens_before([TraceState|Later], RevLate, RevEarly, State) ->
   NewTraceState = update_trace_state(
 					Event, TraceState, HappenedBeforeClock, NewClockMap),
   
-  assign_happens_before(Later, [NewTraceState|RevLate], RevEarly, State).
+  assign_happens_before(Later, [NewTraceState|AlreadyExplored], RevEarly, State).
+
 
 
 update_trace_state(Event, TraceState, HappenedBeforeClock, NewClockMap) ->
@@ -610,9 +620,11 @@ update_trace_state(Event, TraceState, HappenedBeforeClock, NewClockMap) ->
       clock_map = FinalClockMap,
       done = [Event|RestEvents]}.
 
+
 % Associate HappenedBeforeClock with the current Actor and store it
 % in the ClockMap. Also, if this events spawns a new process, make
 % sure to also associate the same HappenedBeforeClock with the new PID.
+
 update_clock_map(Event, HappenedBeforeClock, ClockMap) ->
   #event{
 	actor = Actor,
@@ -1481,3 +1493,22 @@ print_trace(SchedState, TraceState) ->
   	    Star = fun(false) -> " ";(_) -> "*" end,
   	    [Star(Dependent), ?pretty_s(EarlyIndex, EarlyEvent)]
  	 end).
+
+
+
+
+log_race(EarlyEvent, Event, SchedState, TraceState) ->
+    #scheduler_state{
+	  logger = Logger
+	} = SchedState,
+	
+  if SchedState#scheduler_state.show_races ->
+    ?unique(Logger, ?lrace,
+       "You can disable race pair messages with '--show_races false'~n",
+       []),
+      EarlyRef = TraceState#trace_state.graph_ref,
+      Ref = SchedState#scheduler_state.current_graph_ref,
+      concuerror_logger:graph_race(Logger, EarlyRef, Ref),
+      concuerror_logger:race(Logger, EarlyEvent, Event);
+    true -> ok
+  end.
