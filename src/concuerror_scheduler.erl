@@ -488,7 +488,7 @@ more_interleavings_for_event(
   EarlyClock = lookup_clock_value(EarlyActor, Clock),
   Action = case EarlyIndex > EarlyClock of
       false -> none;
-      true -> dependent_action(TraceState, Event, Later, Clock, SchedState, NewOldTrace)
+      true -> get_dependent_action(TraceState, Event, Later, Clock, SchedState, NewOldTrace)
     end,
   
   {NewTrace, NewClock} =
@@ -505,7 +505,7 @@ more_interleavings_for_event(
 
 
 
-dependent_action(
+get_dependent_action(
    	TraceState, Event, 
 	Later, Clock, State, NewOldTrace) ->
   
@@ -518,9 +518,11 @@ dependent_action(
   
   case concuerror_dependencies:dependent_safe(EarlyEvent, Event) of
     false -> none;	
+	
     irreversible ->
       NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
       {update_clock, NC};
+	
     true ->
       NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
       case update_trace(Event, TraceState, Later, NewOldTrace, State) of
