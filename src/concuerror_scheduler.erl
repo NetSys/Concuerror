@@ -507,7 +507,7 @@ more_interleavings_for_event(
 
 get_dependent_action(
    	TraceState, Event, 
-	Later, Clock, State, NewOldTrace) ->
+	Later, Clock, State, Earlier) ->
   
   #scheduler_state{logger = Logger} = State,
   
@@ -525,7 +525,7 @@ get_dependent_action(
 	
     true ->
       NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
-      case update_trace(Event, TraceState, Later, NewOldTrace, State) of
+      case update_trace(Event, TraceState, Later, Earlier, State) of
         skip -> 
 		  {update_clock, NC};
         UpdatedNewOldTrace ->
@@ -654,6 +654,7 @@ not_dep([TraceState|Rest], Actor, Index, Event, NotDep) ->
      clock_map = ClockMap,
      done = [#event{actor = LaterActor} = LaterEvent|_]
     } = TraceState,
+  
   LaterClock = lookup_clock(LaterActor, ClockMap),
   ActorLaterClock = lookup_clock_value(Actor, LaterClock),
   NewNotDep =
@@ -732,9 +733,11 @@ replay_wakeup_tree(#scheduler_state{}=State) ->
 
 insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, Optimal) ->
   case Optimal of
-    true -> insert_wakeup(Sleeping, Wakeup, NotDep);
+    true ->
+	  insert_wakeup(Sleeping, Wakeup, NotDep);
     false ->
       Initials = get_initials(NotDep),
+	  io:format("Initials: ~p~n~n", Initials),
       All = Sleeping ++ [W || {W, []} <- Wakeup],
       case existing(All, Initials) of
         true -> skip;
@@ -780,13 +783,11 @@ get_initials([], Initials, _) ->
   lists:reverse(Initials);
 
 get_initials([Event|Rest], Initials, All) ->
-  Fold =
-    fun(Initial, Acc) ->
+  Fun = fun(Initial, Acc) ->
         Acc andalso
           concuerror_dependencies:dependent_safe(Initial, Event) =:= false
     end,
-  NewInitials =
-    case lists:foldr(Fold, true, All) of
+  NewInitials = case lists:foldr(Fun, true, All) of
       true -> [Event|Initials];
       false -> Initials
     end,
@@ -800,18 +801,17 @@ check_initial(Event, NotDep) ->
 check_initial(_Event, [], Acc) ->
   lists:reverse(Acc);
 
-check_initial(Event, [E|NotDep], Acc) ->
-  #event{actor = EventActor} = Event,
-  #event{actor = EActor} = E,
+check_initial(
+  	#event{actor = EventActor}, 
+  	[#event{actor = EActor}|NotDep], Acc) when EventActor =:= EActor->
+  lists:reverse(Acc, NotDep);
+
   
-  case EventActor =:= EActor of
-    true -> lists:reverse(Acc,NotDep);
-    false ->
+check_initial(Event, [E|NotDep], Acc) ->
       case concuerror_dependencies:dependent_safe(Event, E) of
         True when True =:= true; True =:= irreversible -> false;
         false -> check_initial(Event, NotDep, [E|Acc])
-      end
-  end.
+      end.
 
 % Find first trace state that has a wakeup tree.
 find_prefix([], _State) -> [];
@@ -1025,7 +1025,7 @@ update_special(Special, State) ->
 
 
 % We found two dependent events, time to update the trace.
-update_trace(Event, TraceState, Later, NewOldTrace, State) ->
+update_trace(Event, TraceState, Later, Earlier, State) ->
   #scheduler_state{logger = Logger, optimal = Optimal} = State,
   #trace_state{
      done = [#event{actor = EarlyActor}|Done],
@@ -1036,12 +1036,9 @@ update_trace(Event, TraceState, Later, NewOldTrace, State) ->
     } = TraceState,
   
   % Filter non-dependent events.
-  NotDep = not_dep(NewOldTrace ++ Later, EarlyActor, EarlyIndex, Event),
+  NotDep = not_dep(Earlier ++ Later, EarlyActor, EarlyIndex, Event),
   case insert_wakeup(Sleeping ++ Done, WakeupTree, NotDep, Optimal) of
-    skip ->
-	  %print_debug(yellow, ["SKIP"]),
-      ?debug(Logger, "     SKIP~n",[]),
-      skip;
+    skip -> skip;
 	% There is a new wake-up tree.
     NewWakeupTree -> case
         (DelayBound =:= infinity) orelse
@@ -1050,7 +1047,7 @@ update_trace(Event, TraceState, Later, NewOldTrace, State) ->
         true ->
           trace_plan(Logger, EarlyIndex, NotDep),
           NS = TraceState#trace_state{wakeup_tree = NewWakeupTree},
-          [NS|NewOldTrace];
+          [NS|Earlier];
         false ->
           Message =
             "Some interleavings were not considered due to delay bounding.~n",
