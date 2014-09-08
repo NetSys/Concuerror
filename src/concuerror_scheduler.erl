@@ -731,19 +731,20 @@ replay_wakeup_tree(#scheduler_state{
 replay_wakeup_tree(#scheduler_state{}=State) ->
   State.
 
-insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, Optimal) ->
-  case Optimal of
-    true ->
-	  insert_wakeup(Sleeping, Wakeup, NotDep);
-    false ->
-      Initials = get_initials(NotDep),
-	  io:format("Initials: ~p~n~n", Initials),
-      All = Sleeping ++ [W || {W, []} <- Wakeup],
-      case existing(All, Initials) of
-        true -> skip;
-        false -> Wakeup ++ [{E,[]}]
-      end
-  end.      
+
+insert_wakeup(Sleeping, Wakeup, NotDep, Optimal) when Optimal ->
+  insert_wakeup(Sleeping, Wakeup, NotDep);
+
+insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, _Optimal) ->
+
+  Initials = get_initials(NotDep),
+  io:format("Initials: ~p~n~n", Initials),
+  All = Sleeping ++ [W || {W, []} <- Wakeup],
+  case existing(All, Initials) of
+    true -> skip;
+    false -> Wakeup ++ [{E,[]}]
+  end.
+
 
 insert_wakeup([Sleeping|Rest], Wakeup, NotDep) ->
   case check_initial(Sleeping, NotDep) =:= false of
@@ -775,6 +776,7 @@ insert_wakeup([{Event, Deeper} = Node|Rest], NotDep) ->
           end
       end
   end.
+
 
 get_initials(NotDeps) ->
   get_initials(NotDeps, [], []).
