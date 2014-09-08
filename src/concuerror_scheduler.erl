@@ -738,7 +738,6 @@ insert_wakeup(Sleeping, Wakeup, NotDep, Optimal) when Optimal ->
 insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, _Optimal) ->
 
   Initials = get_initials(NotDep),
-  io:format("Initials: ~p~n~n", Initials),
   All = Sleeping ++ [W || {W, []} <- Wakeup],
   case existing(All, Initials) of
     true -> skip;
@@ -778,22 +777,24 @@ insert_wakeup([{Event, Deeper} = Node|Rest], NotDep) ->
   end.
 
 
-get_initials(NotDeps) ->
-  get_initials(NotDeps, [], []).
+% Given a temporal ordering of events, find a new ordering such that
+% no past event is dependent with any future event. Consequently, we're
+% allowed to replay the reuslt of this function all at once.
+get_initials(TermporalOrdering) ->
+  get_initials(TermporalOrdering, [], []).
 
 get_initials([], Initials, _) ->
   lists:reverse(Initials);
 
 get_initials([Event|Rest], Initials, All) ->
-  Fun = fun(Initial, Acc) ->
-        Acc andalso
-          concuerror_dependencies:dependent_safe(Initial, Event) =:= false
-    end,
-  NewInitials = case lists:foldr(Fun, true, All) of
-      true -> [Event|Initials];
-      false -> Initials
-    end,
-  get_initials(Rest, NewInitials, [Event|All]).            
+  Fun = fun(Initial, Acc) -> Acc andalso
+    concuerror_dependencies:dependent_safe(Initial, Event) =:= false
+  end,
+  
+  case lists:foldr(Fun, true, All) of
+    true -> get_initials(Rest, [Event|Initials], [Event|All]);
+	false -> get_initials(Rest, Initials, [Event|All]) 
+  end.        
 
 
 % Check to if the given event is dependent with any events in NotDep.
