@@ -14,7 +14,7 @@
 %%------------------------------------------------------------------------------
 
 %% -type clock_vector() :: orddict:orddict(). %% orddict(pid(), index()).
--type clock_map()    :: dict(). %% dict(pid(), clock_vector()).
+-type clock_map()    :: dict:dict(). %% dict(pid(), clock_vector()).
 
 %%------------------------------------------------------------------------------
 
@@ -39,7 +39,7 @@
 % between message_receive and message_delivered. Thus message_delivered
 % is just ignored.
 -record(trace_state, {
-          actors      = []         :: [pid() | {channel(), queue()}],
+          actors      = []         :: [pid() | {channel(), queue:queue()}],
           clock_map   = dict:new() :: clock_map(),
           delay_bound = infinity   :: bound(),
           done        = []         :: [event()],
@@ -150,7 +150,6 @@ explore(#scheduler_state{current_warnings = Warnings,
   
   [CurrentTrace|Old] = Traces,
   #trace_state{
-			   actors = CurActors,
          index = _Index
 			  } = CurrentTrace,
   
@@ -324,9 +323,7 @@ new_dpor_exploration(State) ->
   % does is finds when races have been discovered, etc.
   RacesDetectedState = plan_more_interleavings(State),
   LogState = log_trace(RacesDetectedState),
-  #scheduler_state{trace = NewTrace} = LogState,
-  
-  %#trace_state{wakeup_tree = WUT} = NewTrace,
+  %#scheduler_state{trace = NewTrace} = LogState,
   %io:format("Trace size: ~p~n", [length(NewTrace)]),
 
   % Once we have figured out a new trace, get things ready to replay. What this does
@@ -471,10 +468,6 @@ more_interleavings_for_event(
   	[TraceState|Rest] = _ExploredTraces, Event, 
 	Later, Clock, SchedState, NewOldTrace) ->
   
-  #scheduler_state{
-	  logger = Logger
-	} = SchedState,
-  
   #trace_state{
      done = [#event{actor = EarlyActor} = EarlyEvent|_],
      index = EarlyIndex
@@ -491,13 +484,12 @@ more_interleavings_for_event(
       true -> get_dependent_action(TraceState, Event, Later, Clock, SchedState, NewOldTrace)
     end,
   
-  {NewTrace, NewClock} =
-    case Action of
+  {NewTrace, NewClock} = case Action of
       none -> {[TraceState|NewOldTrace], Clock};
       {update_clock, C} -> {[TraceState|NewOldTrace], C};
       {update, T, C} ->
-		log_race(EarlyEvent, Event, SchedState, TraceState),
-		print_debug(green, ["Race Detected"]),
+        log_race(EarlyEvent, Event, SchedState, TraceState),
+        print_debug(green, ["Race Detected"]),
         {T, C}
     end,
   
@@ -505,9 +497,7 @@ more_interleavings_for_event(
 
 
 
-get_dependent_action(
-   	TraceState, Event, 
-	Later, Clock, State, Earlier) ->
+get_dependent_action(TraceState, Event, Later, Clock, State, Earlier) ->
   
   #scheduler_state{logger = Logger} = State,
   
@@ -526,13 +516,41 @@ get_dependent_action(
     true ->
       NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
       case update_trace(Event, TraceState, Later, Earlier, State) of
-        skip -> 
-		  {update_clock, NC};
-        UpdatedNewOldTrace ->
-          concuerror_logger:plan(Logger),
-          {update, UpdatedNewOldTrace, NC}
+        skip ->               {update_clock, NC};
+        UpdatedNewOldTrace -> {update, UpdatedNewOldTrace, NC}
       end
 end.
+
+
+% We found two dependent events, time to update the trace.
+update_trace(Event, TraceState, Later, Earlier, State) ->
+  #scheduler_state{logger = Logger, optimal = Optimal} = State,
+  #trace_state{
+     done = [#event{actor = EarlyActor}|Done],
+     delay_bound = DelayBound,
+     index = EarlyIndex,
+     sleeping = Sleeping,
+     wakeup_tree = WakeupTree
+    } = TraceState,
+  
+  % Filter non-dependent events.
+  NotDep = not_dep(Earlier ++ Later, EarlyActor, EarlyIndex, Event),
+  case insert_wakeup(Sleeping ++ Done, WakeupTree, NotDep, Optimal) of
+    skip -> skip;
+    NewWakeupTree -> case
+        (DelayBound =:= infinity) orelse
+        (DelayBound - length(Done ++ WakeupTree) > 0)
+      of
+        true ->
+          trace_plan(Logger, EarlyIndex, NotDep),
+          % There is a new wake-up tree.
+          NS = TraceState#trace_state{wakeup_tree = NewWakeupTree},
+          [NS|Earlier];
+        false -> skip
+      end
+  end.
+
+
 
 %% =============================================================================
 %% CAUSAL ANALYSIS
@@ -765,7 +783,7 @@ insert_wakeup([{Wakeup, []} = Node|Rest], NotDep) ->
 	
     false -> case insert_wakeup(Rest, NotDep) of
         skip -> skip;
-        NewTree -> [Node|NewTree] 
+        NewTree -> [Node|NewTree]
       end;
 	
     _ -> skip
@@ -1038,38 +1056,7 @@ update_special(Special, State) ->
   State#scheduler_state{trace = [NewNext|Trace]}.
 
 
-% We found two dependent events, time to update the trace.
-update_trace(Event, TraceState, Later, Earlier, State) ->
-  #scheduler_state{logger = Logger, optimal = Optimal} = State,
-  #trace_state{
-     done = [#event{actor = EarlyActor}|Done],
-     delay_bound = DelayBound,
-     index = EarlyIndex,
-     sleeping = Sleeping,
-     wakeup_tree = WakeupTree
-    } = TraceState,
-  
-  % Filter non-dependent events.
-  NotDep = not_dep(Earlier ++ Later, EarlyActor, EarlyIndex, Event),
-  case insert_wakeup(Sleeping ++ Done, WakeupTree, NotDep, Optimal) of
-    skip -> skip;
-	% There is a new wake-up tree.
-    NewWakeupTree -> case
-        (DelayBound =:= infinity) orelse
-        (DelayBound - length(Done ++ WakeupTree) > 0)
-      of
-        true ->
-          trace_plan(Logger, EarlyIndex, NotDep),
-          NS = TraceState#trace_state{wakeup_tree = NewWakeupTree},
-          [NS|Earlier];
-        false ->
-          Message =
-            "Some interleavings were not considered due to delay bounding.~n",
-          ?unique(Logger, ?lwarning, Message, []),
-          ?debug(Logger, "     OVER BOUND~n",[]),
-          skip
-      end
-  end.
+
 
 filter_sleeping([], AvailableActors) -> AvailableActors;
 filter_sleeping([#event{actor = Actor}|Sleeping], AvailableActors) ->
@@ -1492,15 +1479,9 @@ print_debug(blue, Msg) ->
   io:format("\e[1;34m~p\e[m~n~n", Msg).
 
 
-print_trace(SchedState, TraceState) ->
+print_trace(_SchedState, _TraceState) ->
   
-  #trace_state{
-     done = [EarlyEvent|_],
-	 clock_map = ClockMap,
-     index = EarlyIndex
-    } = TraceState,
-  
-   ?trace(SchedState#scheduler_state.logger,
+   ?trace(_SchedState#scheduler_state.logger,
    	 "    ~s ~s~n",
      begin
   	    Star = fun(false) -> " ";(_) -> "*" end,
