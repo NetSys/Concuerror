@@ -732,11 +732,22 @@ replay_wakeup_tree(#scheduler_state{}=State) ->
   State.
 
 
-insert_wakeup(Sleeping, Wakeup, NotDep, Optimal) when Optimal ->
-  insert_wakeup(Sleeping, Wakeup, NotDep);
+% 1) go over all [Sleeping] events and make sure they ARE NOT dependent with
+% NotDep set. If any of them are, return 'skip', otherwise
+% 2) go over all [Wakeup] events and make sure they ARE dependent with
+% NotDep set. If any of them are not, return 'skip', otherwise return
+% a new wakeup tree containing all NotDep.
+insert_wakeup([Sleeping|Rest], Wakeup, NotDep, Optimal) when Optimal ->
+  case dep_free(Sleeping, NotDep) =:= false of
+    true  -> insert_wakeup(Rest, Wakeup, NotDep, Optimal);
+    false -> skip
+  end;
+
+insert_wakeup([], Wakeup, NotDep, Optimal) when Optimal ->
+  insert_wakeup(Wakeup, NotDep);
+
 
 insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, _Optimal) ->
-
   Initials = get_initials(NotDep),
   All = Sleeping ++ [W || {W, []} <- Wakeup],
   case existing(All, Initials) of
@@ -745,35 +756,35 @@ insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, _Optimal) ->
   end.
 
 
-insert_wakeup([Sleeping|Rest], Wakeup, NotDep) ->
-  case check_initial(Sleeping, NotDep) =:= false of
-    true  -> insert_wakeup(Rest, Wakeup, NotDep);
-    false -> skip
-  end;
-
-insert_wakeup([], Wakeup, NotDep) ->
-  insert_wakeup(Wakeup, NotDep).
-
 insert_wakeup([], NotDep) ->
   Fold = fun(Event, Acc) -> [{Event, Acc}] end,
   lists:foldr(Fold, [], NotDep);
 
-insert_wakeup([{Event, Deeper} = Node|Rest], NotDep) ->
-  case check_initial(Event, NotDep) of
-    false ->
-      case insert_wakeup(Rest, NotDep) of
+insert_wakeup([{Wakeup, []} = Node|Rest], NotDep) ->
+  case dep_free(Wakeup, NotDep) of
+	
+    false -> case insert_wakeup(Rest, NotDep) of
+        skip -> skip;
+        NewTree -> [Node|NewTree] 
+      end;
+	
+    _ -> skip
+  
+  end;
+
+insert_wakeup([{Wakeup, Deeper} = Node|Rest], NotDep) ->
+  case dep_free(Wakeup, NotDep) of
+	
+    false -> case insert_wakeup(Rest, NotDep) of
         skip -> skip;
         NewTree -> [Node|NewTree]
       end;
-    NewNotDep ->
-      case Deeper =:= [] of
-        true  -> skip;
-        false ->
-          case insert_wakeup(Deeper, NewNotDep) of
-            skip -> skip;
-            NewTree -> [{Event, NewTree}|Rest]
-          end
+	
+    NewNotDep -> case insert_wakeup(Deeper, NewNotDep) of
+        skip -> skip;
+        NewTree -> [{Wakeup, NewTree}|Rest]
       end
+  
   end.
 
 
@@ -797,24 +808,24 @@ get_initials([Event|Rest], Initials, All) ->
   end.        
 
 
-% Check to if the given event is dependent with any events in NotDep.
-check_initial(Event, NotDep) ->
-  check_initial(Event, NotDep, []).
+% Check to if the given event is dependency-free with all events in NotDep.
+dep_free(Event, NotDep) ->
+  dep_free(Event, NotDep, []).
 
-check_initial(_Event, [], Acc) ->
-  lists:reverse(Acc);
-
-check_initial(
+dep_free(
   	#event{actor = EventActor}, 
-  	[#event{actor = EActor}|NotDep], Acc) when EventActor =:= EActor->
+  	[#event{actor = EActor}|NotDep], 
+	Acc) when EventActor =:= EActor->
   lists:reverse(Acc, NotDep);
 
-  
-check_initial(Event, [E|NotDep], Acc) ->
+dep_free(Event, [E|NotDep], Acc) ->
       case concuerror_dependencies:dependent_safe(Event, E) of
         True when True =:= true; True =:= irreversible -> false;
-        false -> check_initial(Event, NotDep, [E|Acc])
-      end.
+        false -> dep_free(Event, NotDep, [E|Acc])
+      end;
+
+dep_free(_Event, [], Acc) ->
+  lists:reverse(Acc).
 
 % Find first trace state that has a wakeup tree.
 find_prefix([], _State) -> [];
