@@ -43,12 +43,13 @@
 -define(debug_flag(_A, _B, _C), ?debug(_B, _C)).
 -endif.
 %%------------------------------------------------------------------------------
--type scheduler() :: pid().
--type logger()    :: pid().
--type stream()    :: 'standard_io' | 'standard_error' | file:filename().
--type options()   :: proplists:proplist().
+-type scheduler()  :: pid().
+-type logger()     :: pid().
+-type stream()     :: 'standard_io' | 'standard_error' | file:filename().
+-type options()    :: proplists:proplist().
 -type scheduling() :: 'oldest' | 'newest' | 'round_robin'.
--type bound()     :: 'infinity' | non_neg_integer().
+-type algo()       :: 'dpor' | 'transdpor'.
+-type bound()      :: 'infinity' | non_neg_integer().
 -define(opt(A,O),proplists:get_value(A,O)).
 %%------------------------------------------------------------------------------
 %% Logger verbosity

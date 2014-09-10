@@ -69,6 +69,7 @@
           print_depth              :: pos_integer(),
           processes                :: processes(),
           scheduling = oldest      :: scheduling(),
+		  algo = 'dpor'            :: algo(),
           show_races = true        :: boolean(),
           strict_scheduling = false :: boolean(),
           system            = []   :: [pid()],
@@ -115,6 +116,7 @@ run(Options) ->
        print_depth = ?opt(print_depth, Options),
        processes = ?opt(processes, Options),
        scheduling = ?opt(scheduling, Options),
+	   algo = ?opt(algo, Options),
        show_races = ?opt(show_races, Options),
        strict_scheduling = ?opt(strict_scheduling, Options),
        system = System,
@@ -145,13 +147,17 @@ explore(#scheduler_state{current_warnings = Warnings,
       end;
 
 
-explore(#scheduler_state{current_warnings = Warnings,
-				   trace = Traces} = State) ->
+explore(State) ->
   
-  [CurrentTrace|Old] = Traces,
+  #scheduler_state{
+    current_warnings = Warnings,
+	algo = Algo,
+    trace = [CurrentTrace|Old]
+  } = State,
+  
   #trace_state{
-         index = _Index
-			  } = CurrentTrace,
+    index = _Index
+  } = CurrentTrace,
   
   {Status, UpdatedEvent} = try
       % Change get_next_event to remove replay dependency on wakeup trees.
@@ -174,10 +180,9 @@ explore(#scheduler_state{current_warnings = Warnings,
 	  explore(UpdatedState);
 	
     none ->
-    print_debug(yellow, ["Depth "
-        ++ integer_to_list(_Index)]),
+      print_debug(yellow, ["Depth "++ integer_to_list(_Index)]),
 
-    UpdatedState = update_state(State),
+      UpdatedState = update_state(State),
       {HasMore, NewState} = new_dpor_exploration(UpdatedState),
       case HasMore of
         true -> explore(NewState);
@@ -318,7 +323,9 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 %% HIGH LEVEL SCHEDULING FUNCTIONS
 %% =============================================================================
 
-new_dpor_exploration(State) ->
+
+new_dpor_exploration(#scheduler_state{algo = Algo} = State) 
+  	when Algo =:= dpor ->
   % Done exploring one branch, figure out what to do next. In particular what this
   % does is finds when races have been discovered, etc.
   RacesDetectedState = plan_interleavings(State),
@@ -330,16 +337,16 @@ new_dpor_exploration(State) ->
   % (b) Go through all states starting from this point.
   % (c) Execute the set of steps in the wakeup tree so that a race is likely.
   % (b) Replay from this point to find a race.
-  has_more_to_explore(LogState).
+  has_more_to_explore(LogState);
 
+new_dpor_exploration(#scheduler_state{algo = Algo}) ->
+  ?crash({"unknown exploration algorithm", Algo}).
 
 has_more_to_explore(State) ->
   #scheduler_state{logger = Logger, trace = Trace} = State,
   % Find the first state from which we expect to find a race 
   % (i.e., which has a wake up tree).
   TracePrefix = find_prefix(Trace, State),
-  
-  %io:format("~nTracePrefix          ~p~n~n", [TracePrefix]),
   
   case TracePrefix =:= [] of
     true -> {false, State#scheduler_state{trace = []}};
@@ -365,9 +372,11 @@ has_more_to_explore(State) ->
 
 
 % Complexity:
-% split_trace             | N +
-% assign_happens_before   | N^2 +
-% plan_interleavings_impl | N^3
+% plan_interleavings            |
+%   |-> split_trace             | N +
+%   |-> assign_happens_before   | N^2 +
+%     |-> happens_before_clock  |
+%   |-> plan_interleavings_impl | N^3
 %                         = N^3
 plan_interleavings(State) ->
   print_debug(red, ["================ new exploration ================"]),
@@ -511,7 +520,7 @@ plan_interleavings_for_event([TraceState|Rest] = _ExploredTraces, Event,
 %              = N
 get_dependent_action(TraceState, Event, Later, Clock, State, Earlier) ->
   
-  #scheduler_state{logger = Logger} = State,
+  %#scheduler_state{logger = Logger} = State,
   
   #trace_state{
      clock_map = EarlyClockMap,
@@ -574,7 +583,7 @@ update_trace(Event, TraceState, Later, Earlier, State) ->
 % NotDep set. If any of them are not, return 'skip', otherwise return
 % a new wakeup tree containing all NotDep.
 %
-% Complexity: 2N 
+% Complexity: 2N = N
 insert_wakeup([Sleeping|Rest], Wakeup, NotDep, Optimal) when Optimal ->
   case dep_free(Sleeping, NotDep) =:= false of
     true  -> insert_wakeup(Rest, Wakeup, NotDep, Optimal);

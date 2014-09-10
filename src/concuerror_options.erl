@@ -109,6 +109,9 @@ options() ->
   ,{scheduling, undefined, {atom, round_robin},
     "How Concuerror picks the next process to run. Valid choices are 'oldest',"
     " 'newest' and 'round_robin'."}
+  ,{algo, undefined, {atom, dpor},
+	"The exploration algorithm to use. Currently supported:"
+    " 'dpor' and 'transdpor'"}
   ,{strict_scheduling, undefined, {boolean, false},
     "Whether Concuerror should enforce the scheduling strategy strictly or lets"
     " a process run until blocked before reconsidering the scheduling policy."}
