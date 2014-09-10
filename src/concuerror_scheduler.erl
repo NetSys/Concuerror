@@ -321,10 +321,8 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 new_dpor_exploration(State) ->
   % Done exploring one branch, figure out what to do next. In particular what this
   % does is finds when races have been discovered, etc.
-  RacesDetectedState = plan_more_interleavings(State),
+  RacesDetectedState = plan_interleavings(State),
   LogState = log_trace(RacesDetectedState),
-  %#scheduler_state{trace = NewTrace} = LogState,
-  %io:format("Trace size: ~p~n", [length(NewTrace)]),
 
   % Once we have figured out a new trace, get things ready to replay. What this does
   % is very simple:
@@ -366,7 +364,12 @@ has_more_to_explore(State) ->
   end.
 
 
-plan_more_interleavings(State) ->
+% Complexity:
+% split_trace             | N +
+% assign_happens_before   | N^2 +
+% plan_interleavings_impl | N^3
+%                         = N^3
+plan_interleavings(State) ->
   print_debug(red, ["================ new exploration ================"]),
 
   #scheduler_state{logger = Logger, trace = RevTrace} = State,
@@ -384,17 +387,23 @@ plan_more_interleavings(State) ->
 
   %?time(Logger, "Planning more interleavings..."),
 
-  NewRevTrace = plan_more_interleavings(lists:reverse(RevEarly, Late), [], State),
+  NewRevTrace = plan_interleavings_impl(
+                  lists:reverse(RevEarly, Late), [], State),
   State#scheduler_state{trace = NewRevTrace}.
 
 
 % (Events in order, New Trace, Scheduler State)
-plan_more_interleavings([], ExploredTraces, _SchedulerState) ->
+plan_interleavings_impl([], ExploredTraces, _SchedulerState) ->
   ExploredTraces;
 
 
-plan_more_interleavings([TraceState|Rest] = _UnexploredTraces, 
-						ExploredTraces, State) ->
+% Complexity:
+% plan_interleavings_impl      | (N) *
+% plan_interleavings_for_event | (N + 1)/2 *
+%  |-> get_dependent_action    | (N)
+%                              = (N^3 + N^2)/2 = N^3
+plan_interleavings_impl([TraceState|UnexploredRest],
+                        ExploredTraces, State) ->
   
   #scheduler_state{
      logger = _Logger,
@@ -402,9 +411,9 @@ plan_more_interleavings([TraceState|Rest] = _UnexploredTraces,
     } = State,
   
   #trace_state{
-		     done = [Event|_] = _Done, 
-		     index = _Index, 
-             graph_ref = Ref
+    done = [Event|_] = _Done,
+    index = _Index,
+    graph_ref = Ref
   } = TraceState,
   
   #event{
@@ -422,15 +431,17 @@ plan_more_interleavings([TraceState|Rest] = _UnexploredTraces,
   
   case Skip of
     true ->
-      plan_more_interleavings(Rest, [TraceState|ExploredTraces], State);
+      plan_interleavings_impl(UnexploredRest,
+                              [TraceState|ExploredTraces], State);
     false ->
       BaseClock = update_actor_clock(Event, State, ExploredTraces),
       GState = State#scheduler_state{current_graph_ref = Ref},
 	  
 	  % Do the actual planning.	 
-      BaseNewOldTrace = more_interleavings_for_event(
-						  ExploredTraces, Event, Rest, BaseClock, GState),
-      plan_more_interleavings(Rest, [TraceState|BaseNewOldTrace], State)
+      BaseNewOldTrace = plan_interleavings_for_event(
+              ExploredTraces, Event, UnexploredRest, BaseClock, GState),
+      plan_interleavings_impl(UnexploredRest,
+                              [TraceState|BaseNewOldTrace], State)
   end.
 
 
@@ -456,17 +467,16 @@ update_actor_clock(Event, SchedState, OldTrace) ->
     false -> ActorClock
   end.
 	
-more_interleavings_for_event(ExploredTraces, Event, Later, Clock, State) ->
-  more_interleavings_for_event(ExploredTraces, Event, Later, Clock, State, []).
+plan_interleavings_for_event(ExploredTraces, Event, Later, Clock, State) ->
+  plan_interleavings_for_event(ExploredTraces, Event, Later, Clock, State, []).
 
-more_interleavings_for_event([], _Event, _Later, _Clock, _State, NewOldTrace) ->
+plan_interleavings_for_event([], _Event, _Later, _Clock, _State, NewOldTrace) ->
   lists:reverse(NewOldTrace);
 
 % Go through all previous tarce states (ExploredTraces) and see if any of those events 
 % are causaly related with the given event (Event).
-more_interleavings_for_event(
-  	[TraceState|Rest] = _ExploredTraces, Event, 
-	Later, Clock, SchedState, NewOldTrace) ->
+plan_interleavings_for_event([TraceState|Rest] = _ExploredTraces, Event,
+                             Later, Clock, SchedState, NewOldTrace) ->
   
   #trace_state{
      done = [#event{actor = EarlyActor} = EarlyEvent|_],
@@ -493,10 +503,12 @@ more_interleavings_for_event(
         {T, C}
     end,
   
-  more_interleavings_for_event(Rest, Event, Later, NewClock, SchedState, NewTrace).
+  plan_interleavings_for_event(Rest, Event, Later, NewClock, SchedState, NewTrace).
 
 
-
+% Complexity:
+% update_trace | N
+%              = N
 get_dependent_action(TraceState, Event, Later, Clock, State, Earlier) ->
   
   #scheduler_state{logger = Logger} = State,
@@ -523,6 +535,11 @@ end.
 
 
 % We found two dependent events, time to update the trace.
+%
+% Complexity:
+% not_dep       | (E + L) +
+% insert_wakeup | 2(E + L) +
+%               = 3(E + L) = 3N = N
 update_trace(Event, TraceState, Later, Earlier, State) ->
   #scheduler_state{logger = Logger, optimal = Optimal} = State,
   #trace_state{
@@ -551,13 +568,67 @@ update_trace(Event, TraceState, Later, Earlier, State) ->
   end.
 
 
+% 1) go over all [Sleeping] events and make sure they ARE NOT dependent with
+% NotDep set. If any of them are, return 'skip', otherwise
+% 2) go over all [Wakeup] events and make sure they ARE dependent with
+% NotDep set. If any of them are not, return 'skip', otherwise return
+% a new wakeup tree containing all NotDep.
+%
+% Complexity: 2N 
+insert_wakeup([Sleeping|Rest], Wakeup, NotDep, Optimal) when Optimal ->
+  case dep_free(Sleeping, NotDep) =:= false of
+    true  -> insert_wakeup(Rest, Wakeup, NotDep, Optimal);
+    false -> skip
+  end;
 
-%% =============================================================================
-%% CAUSAL ANALYSIS
-%% =============================================================================
+insert_wakeup([], Wakeup, NotDep, Optimal) when Optimal ->
+  insert_wakeup(Wakeup, NotDep);
 
-% For every event in the trace, where we define an event as: 
-% 	 (1) An actor calling a BIF (<0.66.0>).
+
+insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, _Optimal) ->
+  Initials = get_initials(NotDep),
+  All = Sleeping ++ [W || {W, []} <- Wakeup],
+  case existing(All, Initials) of
+    true -> skip;
+    false -> Wakeup ++ [{E,[]}]
+  end.
+
+
+insert_wakeup([], NotDep) ->
+  Fold = fun(Event, Acc) -> [{Event, Acc}] end,
+  lists:foldr(Fold, [], NotDep);
+
+insert_wakeup([{Wakeup, []} = Node|Rest], NotDep) ->
+  case dep_free(Wakeup, NotDep) of
+	
+    false -> case insert_wakeup(Rest, NotDep) of
+        skip -> skip;
+        NewTree -> [Node|NewTree]
+      end;
+	
+    _ -> skip
+  
+  end;
+
+insert_wakeup([{Wakeup, Deeper} = Node|Rest], NotDep) ->
+  case dep_free(Wakeup, NotDep) of
+	
+    false -> case insert_wakeup(Rest, NotDep) of
+        skip -> skip;
+        NewTree -> [Node|NewTree]
+      end;
+	
+    NewNotDep -> case insert_wakeup(Deeper, NewNotDep) of
+        skip -> skip;
+        NewTree -> [{Wakeup, NewTree}|Rest]
+      end
+  
+  end.
+
+
+
+% For every event in the trace, where we define an event as: (1) An actor 
+% calling a BIF (<0.66.0>).
 % or (2) A channel message event ({<0.65.0>,<0.38.0>}).
 % 
 % ... assign it a value from a monotonically increasing vector clock,
@@ -573,8 +644,13 @@ assign_happens_before(UntimedLate, RevEarly, State) ->
 assign_happens_before([], AlreadyExplored, _RevEarly, _State) ->
   lists:reverse(AlreadyExplored);
 
-assign_happens_before([TraceState|Later] = _UntimedLate, 
-					  AlreadyExplored, RevEarly, State) ->
+% Complexity:
+% assign_happens_before | L *
+% happens_before_clock  | E + (E + 1)/2
+%                       = N/2 ( N/2 + (N/2 + 1)/2 )
+%                       = N^2
+assign_happens_before([TraceState|Later] = _UntimedLate,
+                      AlreadyExplored, RevEarly, State) ->
   
   #scheduler_state{
     logger = _Logger,
@@ -583,12 +659,12 @@ assign_happens_before([TraceState|Later] = _UntimedLate,
   
   #trace_state{
     done = [Event|_RestEvents],
-	index = Index
+    index = Index
   } = TraceState,
   
   #event{
-	actor = Actor,
-	special = Special
+    actor = Actor,
+    special = Special
   } = Event,
   
   ClockMap = get_base_clock(AlreadyExplored, RevEarly),
@@ -607,21 +683,21 @@ assign_happens_before([TraceState|Later] = _UntimedLate,
   NewClockMap = update_clock_map(
 				  Event, HappenedBeforeClock, ClockMap),
   NewTraceState = update_trace_state(
-					Event, TraceState, HappenedBeforeClock, NewClockMap),
+          Event, HappenedBeforeClock, NewClockMap, TraceState),
   
   assign_happens_before(Later, [NewTraceState|AlreadyExplored], RevEarly, State).
 
 
 
-update_trace_state(Event, TraceState, HappenedBeforeClock, NewClockMap) ->
+update_trace_state(Event, HappenedBeforeClock, NewClockMap, TraceState) ->
   
   #trace_state{
     done = [Event|RestEvents],
-	index = Index
+    index = Index
   } = TraceState,
   
   #event{
-	actor = Actor
+    actor = Actor
   } = Event,
 	
   % 'State Clock' keeps track of each actor and its logical clock. 
@@ -748,62 +824,6 @@ replay_wakeup_tree(#scheduler_state{
 
 replay_wakeup_tree(#scheduler_state{}=State) ->
   State.
-
-
-% 1) go over all [Sleeping] events and make sure they ARE NOT dependent with
-% NotDep set. If any of them are, return 'skip', otherwise
-% 2) go over all [Wakeup] events and make sure they ARE dependent with
-% NotDep set. If any of them are not, return 'skip', otherwise return
-% a new wakeup tree containing all NotDep.
-insert_wakeup([Sleeping|Rest], Wakeup, NotDep, Optimal) when Optimal ->
-  case dep_free(Sleeping, NotDep) =:= false of
-    true  -> insert_wakeup(Rest, Wakeup, NotDep, Optimal);
-    false -> skip
-  end;
-
-insert_wakeup([], Wakeup, NotDep, Optimal) when Optimal ->
-  insert_wakeup(Wakeup, NotDep);
-
-
-insert_wakeup(Sleeping, Wakeup, [E|_] = NotDep, _Optimal) ->
-  Initials = get_initials(NotDep),
-  All = Sleeping ++ [W || {W, []} <- Wakeup],
-  case existing(All, Initials) of
-    true -> skip;
-    false -> Wakeup ++ [{E,[]}]
-  end.
-
-
-insert_wakeup([], NotDep) ->
-  Fold = fun(Event, Acc) -> [{Event, Acc}] end,
-  lists:foldr(Fold, [], NotDep);
-
-insert_wakeup([{Wakeup, []} = Node|Rest], NotDep) ->
-  case dep_free(Wakeup, NotDep) of
-	
-    false -> case insert_wakeup(Rest, NotDep) of
-        skip -> skip;
-        NewTree -> [Node|NewTree]
-      end;
-	
-    _ -> skip
-  
-  end;
-
-insert_wakeup([{Wakeup, Deeper} = Node|Rest], NotDep) ->
-  case dep_free(Wakeup, NotDep) of
-	
-    false -> case insert_wakeup(Rest, NotDep) of
-        skip -> skip;
-        NewTree -> [Node|NewTree]
-      end;
-	
-    NewNotDep -> case insert_wakeup(Deeper, NewNotDep) of
-        skip -> skip;
-        NewTree -> [{Wakeup, NewTree}|Rest]
-      end
-  
-  end.
 
 
 % Given a temporal ordering of events, find a new ordering such that
@@ -1149,7 +1169,8 @@ message_clock(Id, MessageInfo, ActorClock, MessageType) ->
 % Pass the result to the next recursive call as a new CurrentActorClock.
 %
 % This function effectively creates 'happens before' clock for the CurrentEvent.
-
+%
+% Complexity: N
 happens_before_clock([], _Event, ActorClock, _State) ->
   ActorClock;
 
@@ -1171,15 +1192,15 @@ happens_before_clock([TraceState|Rest], CurrentEvent, CurrentActorClock, State) 
       false -> CurrentActorClock;
       true ->
         Dependent = concuerror_dependencies:dependent(
-					  EarlyEvent, CurrentEvent, AssumeRacing),
-		print_trace(State, TraceState),
+                    EarlyEvent, CurrentEvent, AssumeRacing),
+        print_trace(State, TraceState),
 		
         case Dependent of
           false -> CurrentActorClock;
           True when True =:= true; True =:= irreversible ->
             EarlyActorClock = lookup_clock(EarlyActor, ClockMap),
-            max_cv(CurrentActorClock, 
-				   orddict:store(EarlyActor, EarlyIndex, EarlyActorClock))
+            max_cv(CurrentActorClock,
+                   orddict:store(EarlyActor, EarlyIndex, EarlyActorClock))
         end
     end,
   
