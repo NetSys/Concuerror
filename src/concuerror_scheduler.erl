@@ -46,7 +46,8 @@
           index       = 1          :: index(),
           graph_ref   = make_ref() :: reference(),
           sleeping    = []         :: [event()],
-          wakeup_tree = []         :: event_tree()
+          wakeup_tree = []         :: event_tree(),
+          freeze      = false      :: bool()
          }).
 
 -type trace_state() :: #trace_state{}.
@@ -161,25 +162,6 @@ explore(State) ->
 
 
 
-% This scheduler is very simple:
-%   (a) Replay that prefix.
-%   (b) Replay the wakup tree that trigers the race.  
-reply_scheduler(TracePrefix, #scheduler_state{logger = Logger} = State) ->
-
-  ?time(Logger, "New interleaving. Replaying..."),
-  Message = ["Replaying " ++ integer_to_list(length(TracePrefix)) ++ " events"],
-  print_debug(yellow, Message),
-  
-  NewState = replay_prefix(TracePrefix, State),
-  
-  print_debug(yellow, ["Replay done"]),
-  ?debug(Logger, "~s~n",["Replay done."]),
-  
-  PreWUTState = NewState#scheduler_state{trace = TracePrefix},
-  
-  replay_wakeup_tree(PreWUTState).
-	  
-
 actor_scheduler(#scheduler_state{current_warnings = Warnings,
 				   depth_bound = Bound,
 				   trace = [#trace_state{index = I}|Old]} = State)
@@ -215,6 +197,23 @@ actor_scheduler(State) ->
 	  update_state(State)
   end.
 
+
+% (a) Replay that prefix.
+% (b) Replay the wakup tree that trigers the race.  
+reply_scheduler(TracePrefix, #scheduler_state{logger = Logger} = State) ->
+
+  ?time(Logger, "New interleaving. Replaying..."),
+  Message = ["Replaying " ++ integer_to_list(length(TracePrefix)) ++ " events"],
+  print_debug(yellow, Message),
+  
+  NewState = replay_prefix(TracePrefix, State), % (a)
+  
+  print_debug(yellow, ["Replay done"]),
+  ?debug(Logger, "~s~n",["Replay done."]),
+  
+  PreWUTState = NewState#scheduler_state{trace = TracePrefix},
+  
+  replay_wakeup_tree(PreWUTState). % (b)
 
 
 handle_crash(Reason, State) ->
@@ -255,21 +254,21 @@ schedule_actors(#scheduler_state{
 
 %% get_next_event(Event, Actors, SchedulerState);
 %% Call next actor in order.
-
 %% If we have a channel just deliver it.
-get_next_event(Event, [{Channel, Queue}|_], State) ->
+get_next_event(Event, [{Channel, Queue}|_], SchedulerState) ->
   %% Pending messages can always be sent
   MessageEvent = queue:get(Queue),
   UpdatedEvent = Event#event{actor = Channel, event_info = MessageEvent},
   % This will always be ok, FinalEvent since messages are never blocked.
-  get_next_event_backend(UpdatedEvent, State); 
+  get_next_event_backend(UpdatedEvent, SchedulerState); 
+
 
 % If the first thing is a process then
-get_next_event(Event, [P|ActiveProcesses], State) ->
+get_next_event(Event, [P|ActiveProcesses], SchedulerState) ->
   % Try calling process. 
-  case get_next_event_backend(Event#event{actor = P}, State) of
+  case get_next_event_backend(Event#event{actor = P}, SchedulerState) of
     % If blocked, try remaining processes.
-    retry -> get_next_event(Event, ActiveProcesses, State);
+    retry -> get_next_event(Event, ActiveProcesses, SchedulerState);
     {ok, UpdatedEvent} -> {ok, UpdatedEvent}
   end;
 
@@ -354,7 +353,7 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 %     |--> happens_before_clock           |
 %   |--> plan_interleavings_impl          | N^3
 %     |--> plan_interleavings_for_event   | 
-%       |--> get_dependent_action         | (N)
+%       |--> get_dependent_action         |
 %                                         = N^3
 %
 % High level explanation of the exploration algorithm:
@@ -365,9 +364,10 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 % configuration
 %
 % Next, assign_happens_before for all untimed events in the configuration. This
-% basically updates the clock map for those events. When ran for the first
-% time, all events are untimed.
-plan_interleavings(State) ->
+% basically updates the clock map for those events.
+plan_interleavings(#scheduler_state{algo = Algo} = State) 
+  	when Algo =:= dpor ->
+  
   print_debug(red, ["================ new exploration ================"]),
 
   #scheduler_state{logger = Logger, trace = RevTrace} = State,
@@ -388,7 +388,38 @@ plan_interleavings(State) ->
   NewRevTrace = plan_interleavings_impl(
                   lists:reverse(RevEarly, Late), [], State),
   
-  State#scheduler_state{trace = NewRevTrace}.
+  State#scheduler_state{trace = NewRevTrace};
+
+
+plan_interleavings(#scheduler_state{algo = Algo} = State) 
+  	when Algo =:= transdpor ->
+  
+  print_debug(red, ["================ new exploration ================"]),
+
+  #scheduler_state{logger = Logger, trace = RevTrace} = State,
+  ?time(Logger, "Assigning happens-before..."),
+  % Split into half which has timing information and half which does not.
+  {RevEarly, UntimedLate} = split_trace(RevTrace),
+  
+  print_debug(blue, ["================ RevEarly0 "
+				   ++ integer_to_list(length(RevEarly)) 
+				   ++ " | Late "
+				   ++ integer_to_list(length(UntimedLate))]),
+
+    
+  % Assign happens before to everything. In other words find races.
+  Late = assign_happens_before(UntimedLate, RevEarly, State),
+  
+  %?time(Logger, "Planning more interleavings..."),
+
+  NewRevTrace = plan_interleavings_impl(
+                  lists:reverse(RevEarly, Late), [], State),
+  
+  State#scheduler_state{trace = NewRevTrace};
+
+
+plan_interleavings(#scheduler_state{algo = Algo} = _State) ->
+  exit({"unknown exploration algorithm", Algo}).
 
 
 % (Events in order, New Trace, Scheduler State)
