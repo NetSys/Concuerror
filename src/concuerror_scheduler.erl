@@ -390,7 +390,16 @@ plan_interleavings(#scheduler_state{algo = Algo} = State)
   
   State#scheduler_state{trace = NewRevTrace};
 
-
+% Exceprt from the paper:
+%
+% "In the actor model, actors have no shared states but only communicate by 
+% exchanging messages. Since processing a message in one actor cannot change
+% the states of other actors, only the transitions that process the messages
+% sent to the same actor are dependent. Hence, when exploring actor systems,
+% to reach all local safety violations and deadlocks, it suffices to explore
+% different interleavings of processing messages in each actor, i.e., it is
+% not necessary to explore interleavings of pro cessing messages across
+% different actors."
 plan_interleavings(#scheduler_state{algo = Algo} = State) 
   	when Algo =:= transdpor ->
   
