@@ -129,64 +129,41 @@ run(Options) ->
   ?time(Logger, "Exploration start"),
   explore(InitialState).
 
-% Out of bounds!
-explore(#scheduler_state{current_warnings = Warnings,
-				   depth_bound = Bound,
-				   trace = [#trace_state{index = I}|Old]} = State)
-    when I =:= Bound + 1->
-	
-  StateBounds = State#scheduler_state{
-  	current_warnings = [{depth_bound, Bound}|Warnings],
-  	trace = Old
-  },
-  
-  UpdatedState = update_state(StateBounds),
-  explore_impl(UpdatedState);
 
 
+
+% Done exploring one configuration (branch).
+%
+% (a) Run the actor scheduler which runs all actors till completion.
+% (b) Try to plan more interleavings.
+% (c) Find a starting point from which the trace should be explored. This is
+%     done by iterating through the configuration states and truncating it at the
+%     first encounter of a wakup tree.
+% (d) If no such prefix exists, this means we're done. Nothing more to
+%     explore (no wake-up trees present)!
+% (e) Otherwise:
+%     (e1) instruct the replay scheduler to replay that prefix.
+%     (e2) Recursiverlly call explore
 explore(State) ->
-  {Status, UpdatedEvent} = actor_scheduler(State),
-  
-  FinalState = case Status of
-	ok ->   
-	  UpdatedState = update_state(UpdatedEvent, State),
-      explore(UpdatedState);
-	none ->
-	  update_state(State)
-  end,
-
-  explore_impl(FinalState).
-
-  
-explore_impl(State) ->
-  
-  % Done exploring one branch, figure out what to do next. In particular what this
-  % does is finds when races have been discovered, etc.
-  RacesDetectedState = plan_interleavings(State),
+  UpdatedState = actor_scheduler(State), % (a)
+  RacesDetectedState = plan_interleavings(UpdatedState), % (b)
   LogState = log_trace(RacesDetectedState),
 
-  % Once we have figured out a new trace, get things ready to replay. What this does
-  % is very simple:
-  % (a) Find a starting point from which the trace should be explored. This is
-  %     done by iterating through the configuration and truncating it at the
-  %     first encounter of a wakup tree.
-  % (b) If no such prefix exists, this means we're done. Nothing more to
-  %     explore!
-  % (c) Otherwise:
-  %     (1) Replay that prefix.
-  %     (2) Replay the wakup tree that trigers the race.  
-  
   #scheduler_state{trace = Trace} = LogState,
-  TracePrefix = find_prefix(Trace, LogState), % (a)
+  TracePrefix = find_prefix(Trace, LogState), % (c)
   
   case TracePrefix =:= [] of
-    true -> ok; % (b)
-    false ->    % (c)
-	  FinalState = reply_scheduler(TracePrefix, State),
-      explore(FinalState)
+    true -> ok; % (d)
+    false ->
+	  FinalState = reply_scheduler(TracePrefix, State), % (e1)
+      explore(FinalState) % (e2)
   end.
 
 
+
+% This scheduler is very simple:
+%   (a) Replay that prefix.
+%   (b) Replay the wakup tree that trigers the race.  
 reply_scheduler(TracePrefix, #scheduler_state{logger = Logger} = State) ->
 
   ?time(Logger, "New interleaving. Replaying..."),
@@ -203,23 +180,41 @@ reply_scheduler(TracePrefix, #scheduler_state{logger = Logger} = State) ->
   replay_wakeup_tree(PreWUTState).
 	  
 
+actor_scheduler(#scheduler_state{current_warnings = Warnings,
+				   depth_bound = Bound,
+				   trace = [#trace_state{index = I}|Old]} = State)
+      when I =:= Bound + 1->
+	
+  StateBounds = State#scheduler_state{
+  	current_warnings = [{depth_bound, Bound}|Warnings],
+  	trace = Old
+  },
+  
+  update_state(StateBounds);
+
+
 actor_scheduler(State) ->
   #scheduler_state{trace = [CurrentTrace|_]} = State,
   
   #trace_state{
     index = _Index
   } = CurrentTrace,
-
   
   {Status, UpdatedEvent} = try
-	  {Event, Actors, ScheduledState} = schedule_actors(State),
-	  get_next_event(Event, Actors, ScheduledState)
-      
-    catch
-      exit:Reason -> handle_crash(Reason, State)
-    end,
-  
-  {Status, UpdatedEvent}.
+	{Event, Actors, ScheduledState} = schedule_actors(State),
+	get_next_event(Event, Actors, ScheduledState)
+  catch
+    exit:Reason -> handle_crash(Reason, State)
+  end,
+
+  case Status of
+	ok ->   
+	  UpdatedState = update_state(UpdatedEvent, State),
+      actor_scheduler(UpdatedState);
+	none ->
+	  update_state(State)
+  end.
+
 
 
 handle_crash(Reason, State) ->
