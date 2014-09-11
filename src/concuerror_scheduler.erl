@@ -132,32 +132,33 @@ run(Options) ->
 % Out of bounds!
 explore(#scheduler_state{current_warnings = Warnings,
 				   depth_bound = Bound,
-				   trace = [#trace_state{index = I}|Old]} = State)
+				   trace = [#trace_state{index = I}|Old] = _TraceStates} = State)
     when I =:= Bound + 1->
-	  
-	  StateBounds = State#scheduler_state{
-      	current_warnings = [{depth_bound, Bound}|Warnings],
-      	trace = Old
-      },
-	  UpdatedState = update_state(StateBounds),
-      {HasMore, NewState} = new_dpor_exploration(UpdatedState),
-      case HasMore of
-        true -> explore(NewState);
-        false -> ok
-      end;
+	
+  StateBounds = State#scheduler_state{
+  	current_warnings = [{depth_bound, Bound}|Warnings],
+  	trace = Old
+  },
+  UpdatedState = update_state(StateBounds),
+  {HasMore, NewState} = new_exploration(UpdatedState),
+  case HasMore of
+    true -> explore(NewState);
+    false -> ok
+  end;
 
 
+
+% High level explanation:
+%
+% (a) Schedule actors.
+% (b) Run them to completion.
 explore(State) ->
-  
-  #scheduler_state{
-    current_warnings = Warnings,
-	algo = Algo,
-    trace = [CurrentTrace|Old]
-  } = State,
+  #scheduler_state{trace = [CurrentTrace|_]} = State,
   
   #trace_state{
     index = _Index
   } = CurrentTrace,
+
   
   {Status, UpdatedEvent} = try
       % Change get_next_event to remove replay dependency on wakeup trees.
@@ -169,36 +170,42 @@ explore(State) ->
 
 	  {Event, Actors, ScheduledState} = schedule_actors(State),
 	  get_next_event(Event, Actors, ScheduledState)
-
+      
     catch
-      exit:Reason -> {{crash, Reason}, State}
+      exit:Reason -> handle_crash(Reason, State)
     end,
   
-  case Status of
-    ok ->
-	  UpdatedState = update_state(UpdatedEvent, State),
-	  explore(UpdatedState);
-	
-    none ->
-      print_debug(yellow, ["Depth "++ integer_to_list(_Index)]),
+  explore_cnt(Status, UpdatedEvent, State).
 
-      UpdatedState = update_state(State),
-      {HasMore, NewState} = new_dpor_exploration(UpdatedState),
-      case HasMore of
-        true -> explore(NewState);
-        false -> ok
-      end;
-	
-    {crash, Why} ->
-      FatalCrashState = State#scheduler_state{
-          current_warnings = [fatal|Warnings],
-          trace = Old
-      },
-	  
-      catch log_trace(FatalCrashState),
-      exit(Why)
+
+explore_cnt(ok, UpdatedEvent, State) ->
+  UpdatedState = update_state(UpdatedEvent, State),
+  explore(UpdatedState);
+
+explore_cnt(none, _, State) ->
+  % Toss the last TraceState.
+  UpdatedState = update_state(State),
+  {HasMore, NewState} = new_exploration(UpdatedState),
+  
+  case HasMore of
+    true -> explore(NewState);
+    false -> ok
   end.
 
+
+handle_crash(Reason, State) ->
+  #scheduler_state{
+    current_warnings = Warnings,
+    trace = [_CurrentTrace|Old]
+  } = State,
+  
+  FatalCrashState = State#scheduler_state{
+    current_warnings = [fatal|Warnings],
+    trace = Old
+  },
+  
+  catch log_trace(FatalCrashState),
+  exit(Reason).
 
 %% =============================================================================
 %% EVENT FUNCTIONS
@@ -214,13 +221,11 @@ schedule_actors(#scheduler_state{
      		   wakeup_tree = [] 
   } = Last,
   
-  % Sort actors, GNE/3 calls actors in order.
   SortedActors = schedule_sort(Actors, State),
   AvailableActors = filter_sleeping(Sleeping, SortedActors),
   % Run through Actors in round robin order. 
   % Allocate an event to hold data about what happened
   Event = #event{label = make_ref()},
-  %get_next_event(Event, System ++ AvailableActors, State#scheduler_state{delay = 0}).
   {Event, System ++ AvailableActors, State#scheduler_state{delay = 0}}.
 
 
@@ -234,8 +239,6 @@ get_next_event(Event, [{Channel, Queue}|_], State) ->
   UpdatedEvent = Event#event{actor = Channel, event_info = MessageEvent},
   % This will always be ok, FinalEvent since messages are never blocked.
   get_next_event_backend(UpdatedEvent, State); 
-  %update_state(FinalEvent, State);
-  %{ok, FinalEvent};
 
 % If the first thing is a process then
 get_next_event(Event, [P|ActiveProcesses], State) ->
@@ -324,7 +327,7 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 %% =============================================================================
 
 
-new_dpor_exploration(#scheduler_state{algo = Algo} = State) 
+new_exploration(#scheduler_state{algo = Algo} = State) 
   	when Algo =:= dpor ->
   % Done exploring one branch, figure out what to do next. In particular what this
   % does is finds when races have been discovered, etc.
@@ -333,51 +336,66 @@ new_dpor_exploration(#scheduler_state{algo = Algo} = State)
 
   % Once we have figured out a new trace, get things ready to replay. What this does
   % is very simple:
-  % (a) Find a starting point/state from which the trace should be explored.
-  % (b) Go through all states starting from this point.
-  % (c) Execute the set of steps in the wakeup tree so that a race is likely.
-  % (b) Replay from this point to find a race.
+  % (a) Find a starting point from which the trace should be explored. This is
+  %     done by iterating through the configuration and truncating it at the
+  %     first encounter of a wakup tree.
+  % (b) If no such prefix exists, this means we're done. Nothing more to
+  %     explore!
+  % (c) Otherwise:
+  %     (1) Replay that prefix.
+  %     (2) Replay the wakup tree that trigers the race.
   has_more_to_explore(LogState);
 
-new_dpor_exploration(#scheduler_state{algo = Algo}) ->
+new_exploration(#scheduler_state{algo = Algo}) ->
   ?crash({"unknown exploration algorithm", Algo}).
 
 has_more_to_explore(State) ->
   #scheduler_state{logger = Logger, trace = Trace} = State,
-  % Find the first state from which we expect to find a race 
-  % (i.e., which has a wake up tree).
-  TracePrefix = find_prefix(Trace, State),
+
+  TracePrefix = find_prefix(Trace, State), % (a)
   
   case TracePrefix =:= [] of
-    true -> {false, State#scheduler_state{trace = []}};
+    true -> {false, State#scheduler_state{trace = []}}; % (b)
     false ->
 
       ?time(Logger, "New interleaving. Replaying..."),
-      % Get us to the state where we can use the wakeup tree to 
-	  % examine a potential race.
 	  print_debug(yellow, ["Replaying " 
 						  ++ integer_to_list(length(TracePrefix)) 
 						  ++ " events"]),
-      NewState = replay_prefix(TracePrefix, State),
-	  print_debug(yellow, ["Replay done"]),
 	  
+      NewState = replay_prefix(TracePrefix, State),
+	  
+	  print_debug(yellow, ["Replay done"]),
       ?debug(Logger, "~s~n",["Replay done."]),
 	  
 	  
       PreWUTState = NewState#scheduler_state{trace = TracePrefix},
-      % Replay the wakeup tree
+	  
       FinalState = replay_wakeup_tree(PreWUTState),
+	  
       {true, FinalState}
   end.
 
-
 % Complexity:
-% plan_interleavings            |
-%   |-> split_trace             | N +
-%   |-> assign_happens_before   | N^2 +
-%     |-> happens_before_clock  |
-%   |-> plan_interleavings_impl | N^3
-%                         = N^3
+% plan_interleavings                      |
+%   |--> split_trace                      | N +
+%   |--> assign_happens_before            | N^2 +
+%     |--> happens_before_clock           |
+%   |--> plan_interleavings_impl          | N^3
+%     |--> plan_interleavings_for_event   | 
+%       |--> get_dependent_action         | (N)
+%                                         = N^3
+%
+% High level explanation of the exploration algorithm:
+%
+% We initially start off with a new configuration. Since this is a new
+% configuration, non of the trace states have no clocks assigned, causing
+% split_trace to return [0, N], when N is the number of states in the 
+% configuration
+%
+% Next, assign_happens_before for all untimed events in the configuration. This
+% basically updates the clock map for those events. When ran for the first
+% time, all events are untimed.
 plan_interleavings(State) ->
   print_debug(red, ["================ new exploration ================"]),
 
@@ -385,19 +403,20 @@ plan_interleavings(State) ->
   ?time(Logger, "Assigning happens-before..."),
   % Split into half which has timing information and half which does not.
   {RevEarly, UntimedLate} = split_trace(RevTrace),
-  
+  print_debug(blue, ["================ RevEarly0 "
+				   ++ integer_to_list(length(RevEarly)) 
+				   ++ " | Late "
+				   ++ integer_to_list(length(UntimedLate))]),
+
+    
   % Assign happens before to everything. In other words find races.
   Late = assign_happens_before(UntimedLate, RevEarly, State),
   
-  print_debug(blue, ["================ RevEarly "
-				   ++ integer_to_list(length(RevEarly)) 
-				   ++ " | Late "
-				   ++ integer_to_list(length(Late))]),
-
   %?time(Logger, "Planning more interleavings..."),
 
   NewRevTrace = plan_interleavings_impl(
                   lists:reverse(RevEarly, Late), [], State),
+  
   State#scheduler_state{trace = NewRevTrace}.
 
 
@@ -508,7 +527,7 @@ plan_interleavings_for_event([TraceState|Rest] = _ExploredTraces, Event,
       {update_clock, C} -> {[TraceState|NewOldTrace], C};
       {update, T, C} ->
         log_race(EarlyEvent, Event, SchedState, TraceState),
-        print_debug(green, ["Race Detected"]),
+        %print_debug(green, ["Race Detected"]),
         {T, C}
     end,
   
@@ -636,8 +655,8 @@ insert_wakeup([{Wakeup, Deeper} = Node|Rest], NotDep) ->
 
 
 
-% For every event in the trace, where we define an event as: (1) An actor 
-% calling a BIF (<0.66.0>).
+% For every event in the trace, where we define an event as:
+% (1) An actor calling a BIF (<0.66.0>).
 % or (2) A channel message event ({<0.65.0>,<0.38.0>}).
 % 
 % ... assign it a value from a monotonically increasing vector clock,
@@ -654,8 +673,8 @@ assign_happens_before([], AlreadyExplored, _RevEarly, _State) ->
   lists:reverse(AlreadyExplored);
 
 % Complexity:
-% assign_happens_before | L *
-% happens_before_clock  | E + (E + 1)/2
+% assign_happens_before | ( L ) *
+% happens_before_clock  | ( E + (E + 1)/2 )
 %                       = N/2 ( N/2 + (N/2 + 1)/2 )
 %                       = N^2
 assign_happens_before([TraceState|Later] = _UntimedLate,
@@ -684,7 +703,7 @@ assign_happens_before([TraceState|Later] = _UntimedLate,
 	    Special, MessageInfo, ActorClock),
   
   HappenedBeforeClock = happens_before_clock(
-		AlreadyExplored++RevEarly, Event, BaseHappenedBeforeClock, State),
+		AlreadyExplored ++ RevEarly, Event, BaseHappenedBeforeClock, State),
   
   maybe_mark_sent_message(Special, HappenedBeforeClock, MessageInfo),
   maybe_mark_delivered_message(Special, HappenedBeforeClock, MessageInfo),
@@ -1506,8 +1525,10 @@ print_debug(yellow, Msg) ->
   io:format("\e[1;33m~p\e[m~n~n", Msg);
 
 print_debug(blue, Msg) ->
-  io:format("\e[1;34m~p\e[m~n~n", Msg).
+  io:format("\e[1;34m~p\e[m~n~n", Msg);
 
+print_debug(other, Msg) ->
+  io:format("\e[1;35m~p\e[m~n~n", Msg).
 
 print_trace(_SchedState, _TraceState) ->
   
