@@ -132,56 +132,37 @@ run(Options) ->
 % Out of bounds!
 explore(#scheduler_state{current_warnings = Warnings,
 				   depth_bound = Bound,
-				   trace = [#trace_state{index = I}|Old] = _TraceStates} = State)
+				   trace = [#trace_state{index = I}|Old]} = State)
     when I =:= Bound + 1->
 	
   StateBounds = State#scheduler_state{
   	current_warnings = [{depth_bound, Bound}|Warnings],
   	trace = Old
   },
+  
   UpdatedState = update_state(StateBounds),
-  
-  % Done exploring one branch, figure out what to do next. In particular what this
-  % does is finds when races have been discovered, etc.
-  RacesDetectedState = plan_interleavings(UpdatedState),
-  LogState = log_trace(RacesDetectedState),
-
-  % Once we have figured out a new trace, get things ready to replay. What this does
-  % is very simple:
-  % (a) Find a starting point from which the trace should be explored. This is
-  %     done by iterating through the configuration and truncating it at the
-  %     first encounter of a wakup tree.
-  % (b) If no such prefix exists, this means we're done. Nothing more to
-  %     explore!
-  % (c) Otherwise:
-  %     (1) Replay that prefix.
-  %     (2) Replay the wakup tree that trigers the race.
-  {HasMore, NewState} = has_more_to_explore(LogState),
-  
-  case HasMore of
-    true -> explore(NewState);
-    false -> ok
-  end;
+  explore_impl(UpdatedState);
 
 
-
-% High level explanation:
-%
-% (a) Schedule actors.
-% (b) Run them to completion.
 explore(State) ->
-  #scheduler_state{trace = [CurrentTrace|_]} = State,
+  {Status, UpdatedEvent} = actor_scheduler(State),
   
-  #trace_state{
-    index = _Index
-  } = CurrentTrace,
+  FinalState = case Status of
+	ok ->   
+	  UpdatedState = update_state(UpdatedEvent, State),
+      explore(UpdatedState);
+	none ->
+	  update_state(State)
+  end,
+
+  explore_impl(FinalState).
 
   
-  UpdatedState = actor_scheduler(State),
+explore_impl(State) ->
   
   % Done exploring one branch, figure out what to do next. In particular what this
   % does is finds when races have been discovered, etc.
-  RacesDetectedState = plan_interleavings(UpdatedState),
+  RacesDetectedState = plan_interleavings(State),
   LogState = log_trace(RacesDetectedState),
 
   % Once we have figured out a new trace, get things ready to replay. What this does
@@ -193,14 +174,34 @@ explore(State) ->
   %     explore!
   % (c) Otherwise:
   %     (1) Replay that prefix.
-  %     (2) Replay the wakup tree that trigers the race.
-  {HasMore, NewState} = has_more_to_explore(LogState),
+  %     (2) Replay the wakup tree that trigers the race.  
   
-  case HasMore of
-    true -> explore(NewState);
-    false -> ok
+  #scheduler_state{trace = Trace} = LogState,
+  TracePrefix = find_prefix(Trace, LogState), % (a)
+  
+  case TracePrefix =:= [] of
+    true -> ok; % (b)
+    false ->    % (c)
+	  FinalState = reply_scheduler(TracePrefix, State),
+      explore(FinalState)
   end.
 
+
+reply_scheduler(TracePrefix, #scheduler_state{logger = Logger} = State) ->
+
+  ?time(Logger, "New interleaving. Replaying..."),
+  Message = ["Replaying " ++ integer_to_list(length(TracePrefix)) ++ " events"],
+  print_debug(yellow, Message),
+  
+  NewState = replay_prefix(TracePrefix, State),
+  
+  print_debug(yellow, ["Replay done"]),
+  ?debug(Logger, "~s~n",["Replay done."]),
+  
+  PreWUTState = NewState#scheduler_state{trace = TracePrefix},
+  
+  replay_wakeup_tree(PreWUTState).
+	  
 
 actor_scheduler(State) ->
   #scheduler_state{trace = [CurrentTrace|_]} = State,
@@ -211,13 +212,6 @@ actor_scheduler(State) ->
 
   
   {Status, UpdatedEvent} = try
-      % Change get_next_event to remove replay dependency on wakeup trees.
-      % Perhaps split into three pieces
-      % - Round robin scheduler
-      % - WUT scheduler
-      % - Replay scheduler.
-      % DPOR is then replay followed by WUT followed by round robin.
-
 	  {Event, Actors, ScheduledState} = schedule_actors(State),
 	  get_next_event(Event, Actors, ScheduledState)
       
@@ -225,17 +219,7 @@ actor_scheduler(State) ->
       exit:Reason -> handle_crash(Reason, State)
     end,
   
-  actor_scheduler_cnt(Status, UpdatedEvent, State).
-
-
-
-actor_scheduler_cnt(ok, UpdatedEvent, State) ->
-  UpdatedState = update_state(UpdatedEvent, State),
-  explore(UpdatedState);
-
-actor_scheduler_cnt(none, _, State) ->
-  % Toss the last TraceState.
-  update_state(State).
+  {Status, UpdatedEvent}.
 
 
 handle_crash(Reason, State) ->
@@ -367,38 +351,6 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
     }.
 
 
-%% =============================================================================
-%% HIGH LEVEL SCHEDULING FUNCTIONS
-%% =============================================================================
-
-
-
-has_more_to_explore(State) ->
-  #scheduler_state{logger = Logger, trace = Trace} = State,
-
-  TracePrefix = find_prefix(Trace, State), % (a)
-  
-  case TracePrefix =:= [] of
-    true -> {false, State#scheduler_state{trace = []}}; % (b)
-    false ->
-
-      ?time(Logger, "New interleaving. Replaying..."),
-	  print_debug(yellow, ["Replaying " 
-						  ++ integer_to_list(length(TracePrefix)) 
-						  ++ " events"]),
-	  
-      NewState = replay_prefix(TracePrefix, State),
-	  
-	  print_debug(yellow, ["Replay done"]),
-      ?debug(Logger, "~s~n",["Replay done."]),
-	  
-	  
-      PreWUTState = NewState#scheduler_state{trace = TracePrefix},
-	  
-      FinalState = replay_wakeup_tree(PreWUTState),
-	  
-      {true, FinalState}
-  end.
 
 % Complexity:
 % plan_interleavings                      |
