@@ -140,7 +140,24 @@ explore(#scheduler_state{current_warnings = Warnings,
   	trace = Old
   },
   UpdatedState = update_state(StateBounds),
-  {HasMore, NewState} = new_exploration(UpdatedState),
+  
+  % Done exploring one branch, figure out what to do next. In particular what this
+  % does is finds when races have been discovered, etc.
+  RacesDetectedState = plan_interleavings(UpdatedState),
+  LogState = log_trace(RacesDetectedState),
+
+  % Once we have figured out a new trace, get things ready to replay. What this does
+  % is very simple:
+  % (a) Find a starting point from which the trace should be explored. This is
+  %     done by iterating through the configuration and truncating it at the
+  %     first encounter of a wakup tree.
+  % (b) If no such prefix exists, this means we're done. Nothing more to
+  %     explore!
+  % (c) Otherwise:
+  %     (1) Replay that prefix.
+  %     (2) Replay the wakup tree that trigers the race.
+  {HasMore, NewState} = has_more_to_explore(LogState),
+  
   case HasMore of
     true -> explore(NewState);
     false -> ok
@@ -153,6 +170,39 @@ explore(#scheduler_state{current_warnings = Warnings,
 % (a) Schedule actors.
 % (b) Run them to completion.
 explore(State) ->
+  #scheduler_state{trace = [CurrentTrace|_]} = State,
+  
+  #trace_state{
+    index = _Index
+  } = CurrentTrace,
+
+  
+  UpdatedState = actor_scheduler(State),
+  
+  % Done exploring one branch, figure out what to do next. In particular what this
+  % does is finds when races have been discovered, etc.
+  RacesDetectedState = plan_interleavings(UpdatedState),
+  LogState = log_trace(RacesDetectedState),
+
+  % Once we have figured out a new trace, get things ready to replay. What this does
+  % is very simple:
+  % (a) Find a starting point from which the trace should be explored. This is
+  %     done by iterating through the configuration and truncating it at the
+  %     first encounter of a wakup tree.
+  % (b) If no such prefix exists, this means we're done. Nothing more to
+  %     explore!
+  % (c) Otherwise:
+  %     (1) Replay that prefix.
+  %     (2) Replay the wakup tree that trigers the race.
+  {HasMore, NewState} = has_more_to_explore(LogState),
+  
+  case HasMore of
+    true -> explore(NewState);
+    false -> ok
+  end.
+
+
+actor_scheduler(State) ->
   #scheduler_state{trace = [CurrentTrace|_]} = State,
   
   #trace_state{
@@ -175,22 +225,17 @@ explore(State) ->
       exit:Reason -> handle_crash(Reason, State)
     end,
   
-  explore_cnt(Status, UpdatedEvent, State).
+  actor_scheduler_cnt(Status, UpdatedEvent, State).
 
 
-explore_cnt(ok, UpdatedEvent, State) ->
+
+actor_scheduler_cnt(ok, UpdatedEvent, State) ->
   UpdatedState = update_state(UpdatedEvent, State),
   explore(UpdatedState);
 
-explore_cnt(none, _, State) ->
+actor_scheduler_cnt(none, _, State) ->
   % Toss the last TraceState.
-  UpdatedState = update_state(State),
-  {HasMore, NewState} = new_exploration(UpdatedState),
-  
-  case HasMore of
-    true -> explore(NewState);
-    false -> ok
-  end.
+  update_state(State).
 
 
 handle_crash(Reason, State) ->
@@ -327,27 +372,6 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 %% =============================================================================
 
 
-new_exploration(#scheduler_state{algo = Algo} = State) 
-  	when Algo =:= dpor ->
-  % Done exploring one branch, figure out what to do next. In particular what this
-  % does is finds when races have been discovered, etc.
-  RacesDetectedState = plan_interleavings(State),
-  LogState = log_trace(RacesDetectedState),
-
-  % Once we have figured out a new trace, get things ready to replay. What this does
-  % is very simple:
-  % (a) Find a starting point from which the trace should be explored. This is
-  %     done by iterating through the configuration and truncating it at the
-  %     first encounter of a wakup tree.
-  % (b) If no such prefix exists, this means we're done. Nothing more to
-  %     explore!
-  % (c) Otherwise:
-  %     (1) Replay that prefix.
-  %     (2) Replay the wakup tree that trigers the race.
-  has_more_to_explore(LogState);
-
-new_exploration(#scheduler_state{algo = Algo}) ->
-  ?crash({"unknown exploration algorithm", Algo}).
 
 has_more_to_explore(State) ->
   #scheduler_state{logger = Logger, trace = Trace} = State,
