@@ -351,7 +351,7 @@ reset_event(#event{actor = Actor, event_info = EventInfo}) ->
 %   |--> split_trace                      | N +
 %   |--> assign_happens_before            | N^2 +
 %     |--> happens_before_clock           |
-%   |--> plan_interleavings_impl          | N^3
+%   |--> plan_interleavings_dpor          | N^3
 %     |--> plan_interleavings_for_event   | 
 %       |--> get_dependent_action         |
 %                                         = N^3
@@ -385,7 +385,7 @@ plan_interleavings(#scheduler_state{algo = Algo} = State)
   
   %?time(Logger, "Planning more interleavings..."),
 
-  NewRevTrace = plan_interleavings_impl(
+  NewRevTrace = plan_interleavings_dpor(
                   lists:reverse(RevEarly, Late), [], State),
   
   State#scheduler_state{trace = NewRevTrace};
@@ -421,7 +421,7 @@ plan_interleavings(#scheduler_state{algo = Algo} = State)
   
   %?time(Logger, "Planning more interleavings..."),
 
-  NewRevTrace = plan_interleavings_impl(
+  NewRevTrace = plan_interleavings_dpor(
                   lists:reverse(RevEarly, Late), [], State),
   
   State#scheduler_state{trace = NewRevTrace};
@@ -432,22 +432,22 @@ plan_interleavings(#scheduler_state{algo = Algo} = _State) ->
 
 
 % (Events in order, New Trace, Scheduler State)
-plan_interleavings_impl([], ExploredTraces, _SchedulerState) ->
+plan_interleavings_dpor([], ExploredTraces, _SchedulerState) ->
   ExploredTraces;
 
 
 % Complexity:
-% plan_interleavings_impl      | (N) *
+% plan_interleavings_dpor      | (N) *
 % plan_interleavings_for_event | (N + 1)/2 *
 %  |-> get_dependent_action    | (N)
 %                              = (N^3 + N^2)/2 = N^3
-plan_interleavings_impl([TraceState|UnexploredRest],
+plan_interleavings_dpor([TraceState|UnexploredRest],
                         ExploredTraces, State) ->
   
   #scheduler_state{
-     logger = _Logger,
-     non_racing_system = NonRacingSystem
-    } = State,
+    logger = _Logger,
+    non_racing_system = NonRacingSystem
+  } = State,
   
   #trace_state{
     done = [Event|_] = _Done,
@@ -456,8 +456,8 @@ plan_interleavings_impl([TraceState|UnexploredRest],
   } = TraceState,
   
   #event{
-		 event_info = _EventInfo, 
-		 special = Special
+    event_info = _EventInfo, 
+    special = Special
   } = Event,
   
   % Should we skip trying to find interleavings of this event.
@@ -470,7 +470,7 @@ plan_interleavings_impl([TraceState|UnexploredRest],
   
   case Skip of
     true ->
-      plan_interleavings_impl(UnexploredRest,
+      plan_interleavings_dpor(UnexploredRest,
                               [TraceState|ExploredTraces], State);
     false ->
       BaseClock = update_actor_clock(Event, State, ExploredTraces),
@@ -479,7 +479,7 @@ plan_interleavings_impl([TraceState|UnexploredRest],
 	  % Do the actual planning.	 
       BaseNewOldTrace = plan_interleavings_for_event(
               ExploredTraces, Event, UnexploredRest, BaseClock, GState),
-      plan_interleavings_impl(UnexploredRest,
+      plan_interleavings_dpor(UnexploredRest,
                               [TraceState|BaseNewOldTrace], State)
   end.
 
@@ -512,7 +512,7 @@ plan_interleavings_for_event(ExploredTraces, Event, Later, Clock, State) ->
 plan_interleavings_for_event([], _Event, _Later, _Clock, _State, NewOldTrace) ->
   lists:reverse(NewOldTrace);
 
-% Go through all previous tarce states (ExploredTraces) and see if any of those events 
+% Go thr;ough all previous tarce states (ExploredTraces) and see if any of those events 
 % are causaly related with the given event (Event).
 plan_interleavings_for_event([TraceState|Rest] = _ExploredTraces, Event,
                              Later, Clock, SchedState, NewOldTrace) ->
@@ -544,6 +544,42 @@ plan_interleavings_for_event([TraceState|Rest] = _ExploredTraces, Event,
   
   plan_interleavings_for_event(Rest, Event, Later, NewClock, SchedState, NewTrace).
 
+
+get_dependent_action(TraceState, Event, Later, Clock, 
+					 #scheduler_state{algo = Algo} = SchedState, Earlier)
+  	when Algo =:= transdpor ->
+  
+  %#scheduler_state{logger = Logger} = State,
+  
+  #trace_state{
+     clock_map = EarlyClockMap,
+     done = [#event{actor = EarlyActor} = EarlyEvent|_],
+	 freeze = Freeze
+    } = TraceState,
+  
+  case concuerror_dependencies:dependent_safe(EarlyEvent, Event) of
+    false -> none;	
+	
+    irreversible ->
+      NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
+      {update_clock, NC};
+	
+    true ->
+      NC = max_cv(lookup_clock(EarlyActor, EarlyClockMap), Clock),
+	  case Freeze of
+		true ->
+          {update_clock, NC};
+		false -> 
+		  % Set the freeze flag if not already set.
+		  NewTraceState = TraceState#trace_state{freeze = true},
+          case update_trace(Event, NewTraceState, Later, Earlier, SchedState) of
+            skip ->               {update_clock, NC};
+            UpdatedNewOldTrace -> {update, UpdatedNewOldTrace, NC}
+          end
+
+	  end
+
+end;
 
 % Complexity:
 % update_trace | N
@@ -910,12 +946,29 @@ find_prefix([], _State) -> [];
 find_prefix([#trace_state{wakeup_tree = []}|Rest], State) ->
   find_prefix(Rest, State);
 
-find_prefix([#trace_state{graph_ref = Sibling} = Other|Rest], State) ->
-  #scheduler_state{logger = Logger} = State,
+find_prefix([#trace_state{graph_ref = Sibling, freeze = Freeze} = Other|Rest], 
+			#scheduler_state{algo = Algo} = SchedState) 
+  	when Algo =:= transdpor ->
+  
+  ?assert(Freeze =:= true),
+  #scheduler_state{logger = Logger} = SchedState,
   [#trace_state{graph_ref = Parent}|_] = Rest,
   % Exploring states from this state onwards.
   concuerror_logger:graph_set_node(Logger, Parent, Sibling),
-  [Other#trace_state{graph_ref = make_ref(), clock_map = dict:new()}|Rest].
+  [Other#trace_state{
+    graph_ref = make_ref(),
+    clock_map = dict:new(),
+	freeze = false}|Rest];
+
+find_prefix([#trace_state{graph_ref = Sibling} = Other|Rest], SchedState) ->
+  #scheduler_state{logger = Logger} = SchedState,
+  [#trace_state{graph_ref = Parent}|_] = Rest,
+  % Exploring states from this state onwards.
+  concuerror_logger:graph_set_node(Logger, Parent, Sibling),
+  [Other#trace_state{
+    graph_ref = make_ref(),
+	clock_map = dict:new()}
+  |Rest].
 
 
 %% =============================================================================
@@ -1538,7 +1591,7 @@ print_debug(yellow, Msg) ->
 print_debug(blue, Msg) ->
   io:format("\e[1;34m~p\e[m~n~n", Msg);
 
-print_debug(other, Msg) ->
+print_debug(purple, Msg) ->
   io:format("\e[1;35m~p\e[m~n~n", Msg).
 
 print_trace(_SchedState, _TraceState) ->
