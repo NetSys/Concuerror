@@ -1179,6 +1179,24 @@ filter_sleeping([#event{actor = Actor}|Sleeping], AvailableActors) ->
     end,
   filter_sleeping(Sleeping, NewAvailableActors).
 
+
+% Sleep sets prohibit visited transitions from executing again
+% until the search explores a dependent transition. Assume that
+% the search explores transition t from state s, backtracks t,
+% then explores t from s instead. Unless the search explores
+% a transition that is dependent with t, no states are reachable
+% via t that were not already reachable via t from s. Thus, t
+% sleeps unless a dependent transition is explored.
+%
+% Example: 
+% After the search explores t1 and all states reachable via 
+% t1 from s, it places t1 in the sleep set for s. No new states
+% become reachable via t1 until the search performs a transition 
+% that is dependent with t1 . Thus, t1 propagates to the sleep
+% set in state s', because t1 <==> t2. When the search explores 
+% t3, however, it cannot propagate t1 to the sleep set in s'
+% because t1 <=/=> t3 . New states may be reachable via t1 
+% from s'', so the search must explore t1 from s''.
 update_sleeping(NewEvent, Sleeping, State) ->
   #scheduler_state{logger = _Logger} = State,
   Pred =
