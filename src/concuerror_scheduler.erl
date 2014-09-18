@@ -47,7 +47,7 @@
           graph_ref   = make_ref() :: reference(),
           sleeping    = []         :: [event()],
           wakeup_tree = []         :: event_tree(),
-          freeze      = false      :: bool()
+          freeze      = false      :: boolean()
          }).
 
 -type trace_state() :: #trace_state{}.
@@ -1292,7 +1292,7 @@ happens_before_clock([TraceState|Rest], CurrentEvent, CurrentActorClock, State) 
   
   #trace_state{
      done = [#event{actor = EarlyActor} = EarlyEvent|_],
-	 clock_map = ClockMap,
+     clock_map = ClockMap,
      index = EarlyIndex
     } = TraceState,
    
@@ -1303,7 +1303,7 @@ happens_before_clock([TraceState|Rest], CurrentEvent, CurrentActorClock, State) 
       true ->
         Dependent = concuerror_dependencies:dependent(
                     EarlyEvent, CurrentEvent, AssumeRacing),
-        print_trace(State, TraceState),
+        print_trace(State, TraceState, Dependent),
 		
         case Dependent of
           false -> CurrentActorClock;
@@ -1612,13 +1612,19 @@ print_debug(blue, Msg) ->
 print_debug(purple, Msg) ->
   io:format("\e[1;35m~p\e[m~n~n", Msg).
 
-print_trace(_SchedState, _TraceState) ->
+print_trace(SchedState, TraceState, Dependent) ->
+
+  #trace_state{
+     done = [EarlyEvent|_],
+     index = EarlyIndex
+    } = TraceState,
+   
   
-   ?trace(_SchedState#scheduler_state.logger,
+   ?trace(SchedState#scheduler_state.logger,
    	 "    ~s ~s~n",
      begin
   	    Star = fun(false) -> " ";(_) -> "*" end,
-  	    [Star(Dependent), ?pretty_s(EarlyIndex, EarlyEvent)]
+        [Star(Dependent), ?pretty_s(EarlyIndex, EarlyEvent)]
  	 end).
 
 
