@@ -9,6 +9,8 @@
 
 %%-define(DEBUG, true).
 -define(CHECK_ASSERTIONS, true).
+-define(EUNIT_NOAUTO, 1).
+
 -include("concuerror.hrl").
 -include_lib("eunit/include/eunit.hrl").
 %%------------------------------------------------------------------------------
@@ -554,7 +556,7 @@ get_dependent_action(TraceState, Event, Later, Clock,
   #trace_state{
      clock_map = EarlyClockMap,
      done = [#event{actor = EarlyActor} = EarlyEvent|_],
-	 freeze = Freeze
+     freeze = Freeze
     } = TraceState,
   
   case concuerror_dependencies:dependent_safe(EarlyEvent, Event) of
@@ -947,8 +949,7 @@ find_prefix([#trace_state{wakeup_tree = []}|Rest], State) ->
   find_prefix(Rest, State);
 
 find_prefix([#trace_state{graph_ref = Sibling, freeze = Freeze} = Other|Rest], 
-			#scheduler_state{algo = Algo} = SchedState) 
-  	when Algo =:= transdpor ->
+#scheduler_state{algo = Algo} = SchedState) when Algo =:= transdpor ->
   
   ?assert(Freeze =:= true),
   #scheduler_state{logger = Logger} = SchedState,
