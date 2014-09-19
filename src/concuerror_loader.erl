@@ -31,11 +31,9 @@ load(Module, Instrumented) ->
           F ->
             {F, F}
         end,
-      catch
-        o:format("~p~n", [code:which(Module)]),
-        load_binary(Module, Filename, Beam, Instrumented),
-        ?log(Logger, ?linfo, "Instrumented ~p~n", [Module]),
-        maybe_instrumenting_myself(Module, Instrumented);
+      catch load_binary(Module, Filename, Beam, Instrumented),
+      ?log(Logger, ?linfo, "Instrumented ~p~n", [Module]),
+      maybe_instrumenting_myself(Module, Instrumented);
     false -> ok
   end.
 

@@ -30,7 +30,6 @@ dependent_safe(E1, E2) ->
 
 dependent(#event{actor = A}, #event{actor = A}, _) ->
   irreversible;
-
 dependent(#event{event_info = Info1, special = Special1},
           #event{event_info = Info2, special = Special2},
           AssumeRacing) ->
@@ -38,7 +37,7 @@ dependent(#event{event_info = Info1, special = Special1},
   M2 = [M || {message_delivered, M} <- Special2],
   try
     lists:any(fun({A,B}) -> dependent(A,B) end,
-              [{I1,I2} || I1 <- [Info1|M1], I2 <- [Info2|M2]])
+              [{I1,I2}|| I1 <- [Info1|M1], I2 <- [Info2|M2]])
   catch
     throw:irreversible -> irreversible;
     Class:Reason ->
@@ -108,13 +107,16 @@ dependent(#exit_event{}, #exit_event{}) ->
   false;
 
 dependent(#message_event{
+             message = #message{data = Data},
              recipient = Recipient,
-             trapping = Trapping},
+             trapping = Trapping,
+             type = EarlyType},
           #message_event{
              recipient = Recipient,
              type = Type
             }) ->
-  message_could_match(fun(_) -> true end, ok, Trapping, Type);
+  (EarlyType =:= message orelse Trapping orelse not_normal(Data)) andalso
+    message_could_match(fun(_) -> true end, ok, Trapping, Type);
 
 dependent(#message_event{
              message = #message{data = Data, id = Id},
@@ -434,6 +436,9 @@ message_could_match(Patterns, Data, Trapping, Type) ->
     andalso
       (Trapping orelse (Type =:= message)).
 
+not_normal({'EXIT', _, normal}) -> false;
+not_normal(_) -> true.
+
 %%------------------------------------------------------------------------------
 
 -define(deps_with_any,fun(_) -> true end).
@@ -441,13 +446,16 @@ message_could_match(Patterns, Data, Trapping, Type) ->
 ets_is_mutating(#builtin_event{mfargs = {_,Op,[_|Rest] = Args}} = Event) ->
   case {Op, length(Args)} of
     {delete        ,2} -> with_key(hd(Rest));
+    {delete_object ,2} ->
+      from_insert(Event#builtin_event.extra, hd(Rest), true);
     {first         ,_} -> false;
     {give_away     ,_} -> ?deps_with_any;
     {info          ,_} -> false;
-    {insert        ,_} -> from_insert(Event#builtin_event.extra, hd(Rest));
+    {insert        ,_} ->
+      from_insert(Event#builtin_event.extra, hd(Rest), false);
     {insert_new    ,_}
       when Event#builtin_event.result ->
-      from_insert(Event#builtin_event.extra, hd(Rest));
+      from_insert(Event#builtin_event.extra, hd(Rest), true);
     {insert_new    ,_} -> false;
     {lookup        ,_} -> false;
     {lookup_element,_} -> false;
@@ -480,6 +488,7 @@ ets_reads_keys(Event) ->
 keys_or_tuples(#builtin_event{mfargs = {_,Op,[_|Rest] = Args}}) ->
   case {Op, length(Args)} of
     {delete        ,2} -> {keys, [hd(Rest)]};
+    {delete_object ,2} -> {tuples, [hd(Rest)]};
     {first         ,_} -> any;
     {give_away     ,_} -> any;
     {info          ,_} -> any;
@@ -498,7 +507,7 @@ keys_or_tuples(#builtin_event{mfargs = {_,Op,[_|Rest] = Args}}) ->
     {update_counter,3} -> {keys, [hd(Rest)]}
   end.
 
-from_insert(Table, Insert) ->
+from_insert(Table, Insert, InsertNewOrDelete) ->
   KeyPos = ets:info(Table, keypos),
   InsertList = case is_list(Insert) of true -> Insert; false -> [Insert] end,
   fun(Event) ->
@@ -513,7 +522,7 @@ from_insert(Table, Insert) ->
             fun(Tuple) ->
                 case lists:keyfind(element(KeyPos, Tuple), KeyPos, InsertList) of
                   false -> false;
-                  InsertTuple -> Tuple =/= InsertTuple
+                  InsertTuple -> InsertNewOrDelete orelse Tuple =/= InsertTuple
                 end
             end,
           lists:any(Pred, Tuples)

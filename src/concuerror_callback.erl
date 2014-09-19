@@ -877,6 +877,7 @@ run_built_in(ets, F, N, [Name|Args], Info)
   when
     false
     ;{F,N} =:= {delete, 2}
+    ;{F,N} =:= {delete_object,2}
     ;{F,N} =:= {first, 1}
     ;{F,N} =:= {insert, 2}
     ;{F,N} =:= {insert_new, 2}
@@ -1004,7 +1005,6 @@ deliver_message(Event, MessageEvent, Timeout, Instant) ->
       false -> Self
     end,
   Recipient ! {Type, Message, Notify},
-  
   receive
     {trapping, Trapping} ->
       NewMessageEvent = MessageEvent#message_event{trapping = Trapping},
@@ -1034,7 +1034,6 @@ deliver_message(Event, MessageEvent, Timeout, Instant) ->
             true -> NewEvent;
             false -> deliver_message(NewEvent, SystemReply, Timeout, Instant)
           end;
-		
         false ->
           SystemReply = find_system_reply(Recipient, Special),
           case Instant =:= false of
@@ -1572,6 +1571,7 @@ ets_ops_access_rights_map(Op) ->
   case Op of
     {delete        ,1} -> own;
     {delete        ,2} -> write;
+    {delete_object ,2} -> write;
     {first         ,_} -> read;
     {give_away     ,_} -> own;
     {info          ,_} -> none;
@@ -1677,10 +1677,22 @@ system_wrapper_loop(Name, Wrapped, Info) ->
                 standard_error ->
                   #concuerror_info{logger = Logger} = Info,
                   {From, Reply, _} = handle_io(Data, {standard_error, Logger}),
+                  Msg =
+                    "Your test sends messages to the 'standard_error' process to"
+                    " write output. Such messages from different processes may"
+                    " race, producing spurious interleavings. Consider using"
+                    " '--non_racing_system standard_error' to avoid them.~n",
+                  ?unique(Logger, ?ltip, Msg, []),
                   {From, Reply};
                 user ->
                   #concuerror_info{logger = Logger} = Info,
                   {From, Reply, _} = handle_io(Data, {standard_io, Logger}),
+                  Msg =
+                    "Your test sends messages to the 'user' process to write"
+                    " output. Such messages from different processes may race,"
+                    " producing spurious interleavings. Consider using"
+                    " '--non_racing_system user' to avoid them.~n",
+                  ?unique(Logger, ?ltip, Msg, []),
                   {From, Reply};
                 Else ->
                   ?crash({unknown_protocol_for_system, Else})
