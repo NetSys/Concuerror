@@ -6,10 +6,8 @@ main(Args) ->
   ScriptDir = filename:dirname(escript:script_name()),
   EbinDir = filename:join([ScriptDir,"ebin"]),
   GetoptDir = filename:join([ScriptDir,"deps","getopt","ebin"]),
-  code:unstick_dir("/usr/lib/erlang/lib/stdlib-2.2/ebin/"),
-  code:unstick_dir("/home/vjeko/workspace/concuerror/ebin/"),
-  code:unstick_dir("/home/vjeko/dev/erlang/distributed_tests/quorum-election-roundlimit-nofsm/ebin/"),
   ok = code:add_pathsa([EbinDir, GetoptDir]),
+  code:unstick_mod(erlang),
   {module, concuerror_inspect} = code:load_file(concuerror_inspect),
   Cover = os:getenv("COVER") =/= false,
   if Cover ->
