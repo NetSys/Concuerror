@@ -141,8 +141,6 @@ explore(State) ->
   case Status of
     ok -> explore(UpdatedState);
     none ->
-      print_trace(UpdatedState),
-	  io:format("~n--------------------~n~n"),
       RacesDetectedState = plan_more_interleavings(UpdatedState),
       LogState = log_trace(RacesDetectedState),
       {HasMore, NewState} = has_more_to_explore(LogState),
@@ -151,8 +149,6 @@ explore(State) ->
         false -> ok
       end;
     {crash, Why} ->
-      print_trace(UpdatedState),
-      io:format("~n------- CRASH ------~n~n"),
       #scheduler_state{
          current_warnings = Warnings,
          trace = [_|Trace]
@@ -185,6 +181,8 @@ log_trace(State) ->
     case Warnings =:= [] of
       true -> none;
       false ->
+        print_trace(State),
+        io:format("~n------ CRASH -------~n~n"),
         TraceInfo =
           case Warnings =:= [sleep_set_block] of
             true -> [];
