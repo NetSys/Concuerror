@@ -108,6 +108,29 @@ run(Options) ->
 
 %%------------------------------------------------------------------------------
 
+print_trace(#scheduler_state{ trace = Trace }) ->
+  print_trace_impl(Trace).
+
+print_trace_impl([Last|Rest]) ->
+  #trace_state{done = [Done|_]} = Last,
+  print_event(Done),
+  print_trace_impl(Rest);
+print_trace_impl([]) ->
+  io:format("~n--------------------~n~n").
+
+print_event(#event{actor = Actor, location = Location}) when is_pid(Actor) ->
+  io:format("{~p, ~p}~n", [Actor, Location]);
+print_event(#event{actor = Channel, event_info = EI}) ->
+  print_message(Channel, EI).
+
+print_message(Channel, #message_event{message = Message} ) ->
+  #message{data = Data} = Message,
+  Value = case is_tuple(Data) of
+    true -> element(1, Data);
+    false -> Data
+  end,
+  io:format("{~p, ~p}~n", [Channel, Value]).
+
 explore(State) ->
   {Status, UpdatedState} =
     try
@@ -118,6 +141,7 @@ explore(State) ->
   case Status of
     ok -> explore(UpdatedState);
     none ->
+      print_trace(UpdatedState),
       RacesDetectedState = plan_more_interleavings(UpdatedState),
       LogState = log_trace(RacesDetectedState),
       {HasMore, NewState} = has_more_to_explore(LogState),

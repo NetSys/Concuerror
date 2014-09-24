@@ -144,7 +144,7 @@ cl_usage() ->
   getopt:usage(getopt_spec(), "./concuerror").
 
 cl_version() ->
-  io:format(standard_error, "Concuerror v~s~n",[?VSN]),
+  %io:format(standard_error, "Concuerror v~s~n",[?VSN]),
   ok.
 
 -spec finalize(options()) -> options().
