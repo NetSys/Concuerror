@@ -116,7 +116,7 @@ print_trace_impl([Last|Rest]) ->
   print_event(Done),
   print_trace_impl(Rest);
 print_trace_impl([]) ->
-  io:format("~n--------------------~n~n").
+  ok.
 
 print_event(#event{actor = Actor, location = Location}) when is_pid(Actor) ->
   io:format("{~p, ~p}~n", [Actor, Location]);
@@ -142,6 +142,7 @@ explore(State) ->
     ok -> explore(UpdatedState);
     none ->
       print_trace(UpdatedState),
+	  io:format("~n--------------------~n~n"),
       RacesDetectedState = plan_more_interleavings(UpdatedState),
       LogState = log_trace(RacesDetectedState),
       {HasMore, NewState} = has_more_to_explore(LogState),
@@ -150,6 +151,8 @@ explore(State) ->
         false -> ok
       end;
     {crash, Why} ->
+      print_trace(UpdatedState),
+      io:format("~n------- CRASH ------~n~n"),
       #scheduler_state{
          current_warnings = Warnings,
          trace = [_|Trace]
