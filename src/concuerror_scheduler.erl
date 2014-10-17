@@ -181,9 +181,9 @@ log_trace(State) ->
     case Warnings =:= [] of
       true -> none;
       false ->
-        io:format("~n------ CRASH -------~n~n"),
-		io:format("~w~n", [Warnings]),
-        print_trace(State),
+        %io:format("~n------ CRASH -------~n~n"),
+		%io:format("~w~n", [Warnings]),
+        %print_trace(State),
         TraceInfo =
           case Warnings =:= [sleep_set_block] of
             true -> [];
